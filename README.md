@@ -1,5 +1,7 @@
 # CapWGC
 
+[![build](https://github.com/tokyoxpa3/CapWGC/actions/workflows/build.yml/badge.svg)](https://github.com/tokyoxpa3/CapWGC/actions/workflows/build.yml)
+
 A lightweight Windows screen recorder and screenshot tool built on Windows.Graphics.Capture,
 Media Foundation and a hand-written MP4 muxer. No FFmpeg, no installer, no runtime dependencies.
 
