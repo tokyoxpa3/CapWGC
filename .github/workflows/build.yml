@@ -51,15 +51,13 @@ jobs:
       # package.bat documents that the exe must not import the VC++ runtime,
       # because that is the whole reason the zip is a single folder with no
       # redistributable. Assert it instead of trusting the comment.
+      #
+      # This calls build.bat rather than invoking dumpbin directly: dumpbin is
+      # only on PATH after vcvars, and duplicating the toolset detection here
+      # is how this step broke on the first run ("dumpbin is not recognized").
       - name: Assert no VC++ runtime dependency
         shell: cmd
-        run: |
-          set "VCVARS=%ProgramFiles%\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-          if not exist "%VCVARS%" set "VCVARS=%ProgramFiles%\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
-          call "%VCVARS%" >nul
-          dumpbin /dependents out\CapWGC.exe > dependents.txt
-          findstr /i "vcruntime msvcp" dependents.txt && (echo FAIL: VC++ runtime dependency found & exit /b 1)
-          echo OK: no VC++ runtime dependency
+        run: build\build.bat verify
 
       - name: Resolve version
         id: ver

@@ -154,6 +154,7 @@ if /i "%TARGET%"=="dimtest" goto :dimtest
 if /i "%TARGET%"=="balloontest" goto :balloontest
 if /i "%TARGET%"=="toastclicktest" goto :toastclicktest
 if /i "%TARGET%"=="prtsctest" goto :prtsctest
+if /i "%TARGET%"=="verify" goto :verify
 if /i "%TARGET%"=="all" goto :probe
 
 echo [build] unknown target "%TARGET%"
@@ -306,6 +307,61 @@ rem the loader kills the process before main(), and on Windows 11 it would even
 rem find System32\onnxruntime.dll (an older, API-incompatible build) instead.
 copy /y "%ROOT%\third_party\onnxruntime\lib\onnxruntime.dll" "%OUT%" >nul
 if errorlevel 1 (echo [build] FAILED: copy onnxruntime.dll & exit /b 1)
+
+:verify
+rem Language-level assertions on the built exe. This is a separate target so CI
+rem does not have to re-derive the toolset path: vcvars lives in a different
+rem place on every image, and duplicating the detection logic in the workflow
+rem is exactly how the first run broke (dumpbin not on PATH).
+rem
+rem The claim being checked is package.bat's: the exe uses the static CRT, so
+rem there is no VC++ redistributable to install. If that ever stops holding,
+rem the zip is silently broken for anyone without the redist, so assert it.
+if not exist "%OUT%\CapWGC.exe" (
+  echo [verify] FAILED: out\CapWGC.exe missing - run "build.bat gui" first
+  exit /b 1
+)
+
+echo [verify] CapWGC.exe must not import the VC++ runtime
+dumpbin /dependents "%OUT%\CapWGC.exe" > "%OUT%\dependents.txt"
+if errorlevel 1 (echo [verify] FAILED: dumpbin /dependents & exit /b 1)
+findstr /i "vcruntime msvcp" "%OUT%\dependents.txt" >nul
+if not errorlevel 1 (
+  echo [verify] FAILED: VC++ runtime dependency found:
+  findstr /i "vcruntime msvcp" "%OUT%\dependents.txt"
+  exit /b 1
+)
+echo [verify]   OK - static CRT confirmed
+
+rem onnxruntime.dll is a *runtime* requirement of the OCR path only, which is
+rem why it is /DELAYLOAD'd. A load-time import here would kill the process
+rem before main() on a machine without the DLL.
+rem
+rem dumpbin lists delay-loaded DLLs in the same output, under a separate
+rem "delay load dependencies" heading, so a plain findstr for "onnxruntime"
+rem matches that section too and wrongly reports a load-time import. Compare
+rem line numbers instead: the heading comes first, and the DLL must appear
+rem only after it.
+set "DL_LINE="
+set "ONNX_LINE="
+for /f "tokens=1 delims=:" %%N in ('findstr /n /i "delay load dependencies" "%OUT%\dependents.txt"') do set "DL_LINE=%%N"
+for /f "tokens=1 delims=:" %%N in ('findstr /n /i "onnxruntime.dll" "%OUT%\dependents.txt"') do set "ONNX_LINE=%%N"
+
+if not defined DL_LINE (
+  echo [verify] FAILED: no delay-load section in dumpbin output - /DELAYLOAD lost
+  exit /b 1
+)
+if not defined ONNX_LINE (
+  echo [verify] FAILED: onnxruntime.dll not linked at all
+  exit /b 1
+)
+if %ONNX_LINE% LEQ %DL_LINE% (
+  echo [verify] FAILED: onnxruntime.dll is a load-time import - /DELAYLOAD lost
+  findstr /i "onnxruntime" "%OUT%\dependents.txt"
+  exit /b 1
+)
+echo [verify]   OK - onnxruntime.dll is delay-loaded only
+goto :done
 
 :done
 rem Careful with "->" in echo: cmd treats ">" as a redirect, so "echo OK -> %OUT%"
