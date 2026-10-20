@@ -112,22 +112,30 @@ src/app/main.cpp           WinMain、托盤、熱鍵、狀態機、自我測試
 
 熱鍵**全部可在設定視窗自訂**（§4.8），下表是預設值。
 
+**預設只綁兩個鍵**（2026-10-20 改，同日再把截圖換成 PrtScn）：截圖 / OCR
+與視窗清單。其餘留空 —— 錄影是「謹慎行為」（佔空間、通常是錄給別人看），
+綁一個順手的鍵只會變成誤觸；要的人自己在設定裡指定。
 | 動作 | 預設熱鍵 | 說明 |
 |---|---|---|
-| 選區域錄影 | `Ctrl+Alt+A` | 拖曳出矩形 |
-| 選視窗錄影 | `Ctrl+Alt+A` | 單擊目標視窗（拖曳 < 4px 視為單擊） |
+| 截圖 / OCR | `PrtScn` | 凍結畫面 → 頂端工具列選「截圖」或「OCR」→ 框選（§4.10） |
 | 視窗清單（縮圖牆） | `Ctrl+Alt+W` | 開 Discord 式縮圖牆挑來源（§4.9） |
-| 錄主螢幕 | `Ctrl+Alt+R` | 直接錄游標所在螢幕 |
-| 截圖 / OCR | `Ctrl+Alt+X` | 凍結畫面 → 頂端工具列選「截圖」或「OCR」→ 框選（§4.10） |
-| 停止 | `Ctrl+Alt+S` | |
+| 選區域 / 選視窗錄影 | **未綁定** | 托盤右鍵 → 選區域錄影，拖曳出矩形；單擊目標視窗則錄該視窗（拖曳 < 4px 視為單擊） |
+| 錄主螢幕 | **未綁定** | 托盤右鍵 → 錄主螢幕，直接錄游標所在螢幕 |
+| 停止 | **未綁定** | 錄影中點漂浮控件的紅方塊（§4.2），或托盤右鍵 → 停止 |
 | 設定 / 開啟資料夾 / 結束 | 托盤右鍵選單 | 選單上的熱鍵文字是**動態**的，跟著自訂值變 |
 | 取消選取 | `Esc` 或右鍵 | |
+
+「未綁定」不是壞掉：托盤選單、主視窗、錄影中的漂浮控件都還是完整入口，
+只是沒有鍵盤捷徑。`vk == 0` 的欄位在設定視窗顯示為 `（未設定）`。
+
+截圖預設是 `PrtScn` 之後，`Ctrl+Alt+X` 並沒有消失 —— 它是「關掉 PrtScn 接管」
+時退回的那一組（`SnipFallbackHotkey()`，見 §4.8.5）。
 
 錄製中畫面上只有一顆 66×36 的膠囊（§4.2）：
 
 | 動作 | 操作 | 說明 |
 |---|---|---|
-| 停止 | 點左邊的紅色方塊 | 與 `Ctrl+Alt+S` 等價 |
+| 停止 | 點左邊的紅色方塊 | 與「停止」熱鍵等價（該鍵預設未綁定） |
 | 麥克風靜音 / 恢復 | 點右邊的麥克風 | 圖示變灰加斜線；只影響麥克風那一路，系統聲不動 |
 | 移動控件 | 左鍵按住膠囊拖 | 位置會記住，下次錄影沿用（§4.2.2） |
 | 歸位 | 托盤右鍵 → 重設控件位置 | 錄影中也有效（§4.2.3） |
@@ -597,7 +605,91 @@ region=Ctrl+Alt+A
 picker=Ctrl+Alt+W
 screen=Ctrl+Alt+R
 stop=Ctrl+Alt+S
+snip=PrtScn
 ```
+
+`snip` 預設是 `PrtScn`，所以 INI 裡看到的是 `snip=PrtScn`（不是 `Ctrl+Alt+X`）。
+沒綁定的欄位**不會寫進 INI**（`vk == 0` 直接跳過），所以上面那個 `region` 是
+使用者自己指定過才會有。
+
+#### 4.8.5 截圖預設改用 PrtScn：一個必須「先改系統」的預設值
+
+「用 PrtScn 取代 Windows 剪取工具」現在是**預設開啟**。但這件事不能只靠一個
+預設值，原因是一個很容易誤判的失敗模式：
+
+```cpp
+// Windows 11 預設狀態下：
+RegisterHotKey(hwnd, ID_SNIP, 0, VK_SNAPSHOT)   // 回傳 TRUE
+// 然後……永遠收不到 WM_HOTKEY
+```
+
+Windows 11 的 `PrintScreenKeyForSnippingEnabled` 會在按鍵送到 `RegisterHotKey`
+之前就把它吃掉，交給剪取工具。所以「只把熱鍵預設成 PrtScn」得到的是一個
+**看起來正常、按下去完全沒反應**的程式 —— 比直接報錯還難查。
+
+登錄位置（`HKCU`）：
+
+| 項目 | 值 |
+|---|---|
+| 機碼 | `Control Panel\Keyboard` |
+| 值名 | `PrintScreenKeyForSnippingEnabled` |
+| `0` | 不給剪取工具（我們要的） |
+| `1` / **值不存在** | 給剪取工具（系統預設） |
+
+**「值不存在」與「等於 1」對系統是同義的，但還原時不能混。** 所以查詢結果是
+四態而不是 bool：
+
+| `PrtScnState` | 意思 | 放手的動作 |
+|---|---|---|
+| `Absent` | 值不存在（從沒被改過） | **刪掉**值，不要寫 1 |
+| `Disabled` | 明確是 `0` | 寫回 `1` |
+| `Enabled` | 明確是 `1` | 不用動 |
+| `Error` | 讀不到（權限 / 機碼不存在） | 不動，並記 log |
+
+寫 1 回去會留下一條本來沒有的登錄值；刪掉又會在使用者原本是 `1` 的情況把
+設定變成「不存在」。兩者對系統當下等效，但**對「使用者後來自己去看登錄檔」**
+不等效 —— 這種殘留是最容易被當成「這程式亂改我系統」的那一種。
+
+**啟動順序**（`main.cpp`）：
+
+```
+ReconcilePrtScn(a);      // ini 說接管、登錄檔說沒接管 → 對帳，放手
+AutoEngagePrtScn(a);     // 預設接管
+RegisterAll(msgwnd, ...); // 最後才註冊熱鍵
+```
+
+`AutoEngagePrtScn` 要處理好幾種人，判斷依據是 `[prtsc] chosen` 這個記號
+（「問過了沒」），而不是「INI 有沒有值」—— 舊版存檔一定會寫一行，光看有沒有
+值分不出「沒改過」和「改回舊預設」：
+
+| 情況 | 判斷 | 動作 |
+|---|---|---|
+| 全新安裝 | 沒 ini，`snip` 預設就是 PrtScn | 接管 |
+| 從舊版升級 | `snip` 是舊預設 `Ctrl+Alt+X` 或空的，且沒 `chosen` | 遷移到 PrtScn 並接管 |
+| 自己設過別的鍵 | `snip` 不是舊預設，且沒 `chosen` | **不動**，只補記 `chosen` |
+| 已經選過（不論選什麼） | 有 `chosen` | 不動 |
+| 系統已是 `Disabled` | — | 補記 `owned` + `chosen`（這樣之後關閉接管才還原得回去） |
+
+接管失敗（被別的程式佔用、群組原則鎖住）**不彈提示**，直接退回
+`SnipFallbackHotkey()`（`Ctrl+Alt+X`）並記 `chosen`。理由：這是預設行為、
+不是使用者按了什麼，一則看不懂的警告只會讓人以為程式壞了；狀態在設定視窗的
+OCR 分頁看得到。
+
+**回滾要存「前一個值」，不能存「下一個值」。** `EngagePrtScn` 是兩步
+（先綁熱鍵 → 再改登錄），第二步失敗要退回第一步：
+
+```cpp
+const app::Hotkeys prev = a.settings.hotkeys;   // ← 必須在 ApplyHotkeys 之前存
+app::Hotkeys next = a.settings.hotkeys;
+next.snip = app::Hotkey{0, VK_SNAPSHOT};
+...
+if (st != app::PrtScnState::Disabled && !app::PrtScnTake()) {
+    ApplyHotkeys(a, prev, nullptr);   // 寫成 next 就等於「還原成同一個值」，沒回滾
+```
+
+同理，`ReleasePrtScn` / `ReconcilePrtScn` 的「退回預設」要用
+`SnipFallbackHotkey()`，**不能**用 `Hotkeys::Default().snip` —— 後者現在就是
+PrtScn，等於沒放手，而且按下去不會有反應（Windows 又把鍵拿回去了）。
 
 ### 4.9 縮圖牆：像 Discord 那樣挑來源
 
@@ -811,6 +903,63 @@ if (it.minimized || IsIconic(it.hwnd)) {
 
 `--picker-static` 關掉即時刷新（`live=0`），給 QA 拍可重現的畫面用 ——
 即時刷新會在截圖中途改動清單，讓「有幾張卡片」這類斷言不穩定。
+
+#### 4.9.6 選擇器開著時，截圖熱鍵仍然可用
+
+縮圖牆是**自己的 modal 迴圈**（`PeekMessage` + `WaitMessage`），它開著的時候
+`WM_HOTKEY` 會送到它手上。第一版直接把非 `WM_QUIT` 的訊息 `DispatchMessage`，
+於是 `WM_HOTKEY` 被丟進 picker 的 `WndProc`（它不認識），靜默消失 ——
+症狀就是「選擇器開著，按截圖鍵沒反應」，而使用者完全不知道是選擇器吃掉了。
+
+修法不是「關掉 modal」，而是讓呼叫端有機會**先關掉選擇器、再把訊息重播**：
+
+```cpp
+using SysMsgFn = std::function<bool(const MSG&)>;
+PickResult PickSource(HWND owner, bool live, SysMsgFn onSysMsg);
+```
+
+`Picker::Run()` 的迴圈變成：
+
+```cpp
+if (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+    if (msg.message == WM_QUIT) break;
+    if (onSysMsg_ && onSysMsg_(msg)) {          // ← 呼叫端說「這個我要」
+        sysMsgHit_ = true;
+        sysMsg_ = msg;
+        if (hwnd_) DestroyWindow(hwnd_);         // 先關自己
+        break;
+    }
+    TranslateMessage(&msg);
+    DispatchMessageW(&msg);
+} else {
+    WaitMessage();
+}
+```
+
+回傳的 `PickResult` 帶 `sysMsg = true` 與原訊息，`main.cpp` 用
+`PostMessageW` **重播**回自己的佇列再走正常流程：
+
+```cpp
+if (r.sysMsg) {
+    PostMessageW(a.msgwnd, r.msg.message, r.msg.wParam, r.msg.lParam);
+    return;
+}
+```
+
+三個設計點，少一個就會出事：
+
+1. **一定要先 `DestroyWindow` 再處理。** 直接在同一個堆疊裡開截圖的框選
+   視窗，會變成兩個 modal 疊在一起 —— 截圖視窗在下面，使用者按 `Esc` 只會
+   關掉上面那個，看起來像「按了兩次才關掉」。
+2. **用 `PostMessageW` 重播，不要直接呼叫 `BeginSnip`。** 直接呼叫是在
+   picker 的 `Run()` 還沒返回、`mode` 還是 `Picking` 的時候進去的，狀態機
+   會覺得「還在選來源」而拒絕。重播回佇列等於「等 picker 完全收攤再說」。
+3. **攔截清單要跟托盤選單一致。** 現在攔 `WM_HOTKEY`（`wParam == HOTKEY_SNIP`）
+   與 `WM_APP_SNIP` 兩種，因為托盤選單的截圖項是 `PostMessage(WM_APP_SNIP)`
+   而不是直接呼叫 —— 兩條入口都經過同一道門，才不會修了一條漏一條。
+
+順帶把托盤選單的判斷也放寬了：`Picking` 模式下截圖項**不變灰**（原本
+`mode != Idle` 一律灰掉），因為那正是「選擇器開著也想截圖」的那個狀態。
 
 ### 4.10 截圖 / OCR：工具列是「模式選擇器」，不是「按鈕」
 
@@ -1251,6 +1400,154 @@ visible CapWGC windows: NONE
 另外確認 `%TEMP%\CapWGC\` 在每次辨識後都回到 0 個檔案（連跑好幾次都不累積），
 以及框到空白區時剪貼簿仍是空的（`CF_UNICODETEXT present: False`）。
 
+### 4.11 設定視窗改成分頁：三個 Tab，只 ShowWindow 不重建
+
+原本是一路往下排的長條（476×720），熱鍵那五個欄位被推到最底下，在 1366×768
+的筆電上要捲動才看得到 —— 而它偏偏是改動頻率最高的一塊。現在改成三個分頁：
+
+| 分頁 | 內容 |
+|---|---|
+| 一般 | 輸出資料夾、編碼器、幀率、品質、三個音源/游標開關、分軌勾選 |
+| OCR | 截圖存檔、圖片資料夾、**PrtScn 接管**勾選與說明 |
+| 熱鍵 | 五個熱鍵欄位 + 錯誤訊息（**顯示順序**：視窗清單 → 選區域 → 錄主螢幕 → 停止 → 截圖 / OCR） |
+
+熱鍵欄位的顯示順序和 `hk[]` / `kHotkeyIds[]` 的索引是兩件事：`kHkOrder[]` 存的是
+「原始索引」，`HotkeyProc` 的 `dwRefData` 拿到的也是原始索引，所以排序只影響
+畫面與 Tab 鍵的走訪順序，寫回 `settings` 的對應關係不受影響。最常用的排最上面
+（「視窗清單」連托盤單擊都會走）。
+
+視窗從 476×720 縮到 **476×364**，三頁都塞得下、不需要捲動。
+
+#### 4.11.1 核心取捨：控制項「掛頁面」而不是「切頁重建」
+
+```cpp
+struct DlgState {
+    HWND tab = nullptr;
+    std::vector<HWND> page[3];   // 每個控制項屬於哪一頁
+    int curPage = 0;
+    int pageX = 0, pageY = 0;    // 頁面內容原點（TabCtrl_AdjustRect 算出來）
+};
+```
+
+建立時就決定歸屬，切頁只做 `ShowWindow`：
+
+```cpp
+void ShowPage(HWND h, int page) {
+    for (int i = 0; i < kPageCount; ++i)
+        for (HWND c : g_dlg->page[i]) ShowWindow(c, i == page ? SW_SHOW : SW_HIDE);
+    TabCtrl_SetCurSel(g_dlg->tab, page);
+    g_dlg->curPage = page;
+    InvalidateRect(h, nullptr, TRUE);
+}
+```
+
+**重建會壞三件事**，而且每一件都不會報錯：使用者在欄位裡打到一半的字、
+熱鍵欄位的 `SetWindowSubclass`（重建後子類化掉了，欄位看起來還在但按鍵沒反應）、
+以及控制項的 `ID` 對應。所以寧可多一個 `page[]` 陣列。
+
+`Child()` 建立時自動掛到 `g_curPage` 指定的那一頁：
+
+```cpp
+HWND Child(...) {
+    HWND c = CreateWindowExW(...);
+    if (c && g_dlg && g_curPage >= 0 && g_curPage < kPageCount)
+        g_dlg->page[g_curPage].push_back(c);
+    return c;
+}
+```
+
+用全域 `g_curPage` 而不是多傳一個參數：`Child()` 有三十幾個呼叫點，逐一改只會
+讓版面程式更難讀。
+
+#### 4.11.2 版面用「頁面相對座標」
+
+三頁各自從 `(0,0)` 排起，建立時才加上 `pageX / pageY`：
+
+```cpp
+auto P = [h](int page, const wchar_t* cls, const wchar_t* text, DWORD style,
+             int x, int y, int w, int hh, int id) {
+    g_curPage = page;
+    HWND c = Child(h, cls, text, style, g_dlg->pageX + x, g_dlg->pageY + y, w, hh, id);
+    g_curPage = -1;
+    return c;
+};
+```
+
+原點**不能寫死**，要用 `TabCtrl_AdjustRect`：
+
+```cpp
+RECT dr{};
+GetClientRect(tab, &dr);
+TabCtrl_AdjustRect(tab, FALSE, &dr);          // FALSE = 傳回「內容區」
+MapWindowPoints(tab, h, (POINT*)&dr, 2);
+pageX = dr.left + kPad;
+pageY = dr.top + kPad;
+```
+
+籤頭的高度跟字型、DPI 有關。寫死一個 `y` 在某些縮放比例下會壓到籤上，或留下
+太大的空白 —— 而且**不會有任何錯誤訊息**。
+
+#### 4.11.3 三個容易漏的細節
+
+| 細節 | 沒做會怎樣 |
+|---|---|
+| `ICC_TAB_CLASSES` 加進 `InitCommonControlsEx` | `CreateWindowExW(WC_TABCONTROLW, ...)` 回 `null`，錯誤碼只有「找不到視窗類別」，完全指不到「忘了註冊 common controls」 |
+| 切頁走 `WM_NOTIFY` 的 `TCN_SELCHANGE` | Tab 控制項的通知**不是** `WM_COMMAND`，寫在 `WM_COMMAND` 裡永遠不會觸發 |
+| 焦點落在隱藏控制項時要移走 | 切頁後 Tab 鍵會把焦點送進上一頁的隱藏欄位，使用者看到「游標不見了」 |
+
+還有一個連帶處理：熱鍵錯誤訊息住在熱鍵頁，但使用者可能在「一般」頁按確定。
+那時紅字是隱藏的 —— 視窗不會關、畫面上又沒有任何理由，看起來就是「按確定
+沒反應」。所以 `ShowHotkeyError` 有錯就自動跳回熱鍵頁：
+
+```cpp
+if (!msg.empty()) ShowPage(h, 2);
+```
+
+#### 4.11.4 分頁標題變成亂碼：`TCM_INSERTITEMA` 的陷阱
+
+第一版的分頁標題是壞的：第一格空白、第二格只剩 `O`、第三格是亂碼。原因是
+**這個專案沒有定義 `UNICODE`**（所有 API 都直接呼叫 `...W` 版本，所以平常不會
+有感覺），而 commctrl 的便利巨集會依 `UNICODE` 展開：
+
+```cpp
+TabCtrl_InsertItem(tab, i, &it)
+// 沒有 /DUNICODE → TCM_INSERTITEMA (TCM_FIRST + 7)
+// 有   /DUNICODE → TCM_INSERTITEMW (TCM_FIRST + 62)
+```
+
+把 `TCITEMW` 的寬字串指標交給 A 版處理，comctl32 會把它當 `char*` 讀：
+
+| 標題 | UTF-16 位元組 | 當成 char* 讀到 | 顯示 |
+|---|---|---|---|
+| `一般` | `00 4E 2C 82` | 第一個 byte 就是 `0x00` → 空字串 | 空白 |
+| `OCR` | `4F 00 43 00 52 00` | `'O'` 後面接 `0x00` | `O` |
+| `熱鍵` | `B1 71 75 93` | 四個 byte 才碰到 `0x00` | 亂碼 |
+
+**這個錯誤沒有任何回報**：`SendMessage` 回成功、控制項建立成功、分頁數量正確，
+只有標題是壞的。所以修法做兩層：
+
+1. 呼叫端寫死 `SendMessageW(tab, TCM_INSERTITEMW, ...)`，不依賴巨集。
+2. `build.bat` 的 `CFLAGS` 補上 `/DUNICODE /D_UNICODE`，讓**以後**任何人用
+   `ListView_*` / `TreeView_*` / `TabCtrl_*` 這些巨集都不會再踩到。
+
+`TabCtrl_AdjustRect` / `TabCtrl_SetCurSel` / `TabCtrl_GetCurSel` 沒有這個問題
+（`TCM_ADJUSTRECT` / `TCM_SETCURSEL` / `TCM_GETCURSEL` 本來就只有一份定義，
+沒有 A/W 之分）。
+
+#### 4.11.5 STATIC 的高度要算「折行後」的行數
+
+OCR 頁最後一行被切掉一半。原因是那段說明用 `\r\n` 寫成三行，但**中間那行在
+430px 寬下會自己折成兩行**，實際是四行；而控制項只給了 56px（＝三行）。
+
+`STATIC` 不會回報「字被切掉」，畫面看起來就只是「排版壞了」。所以：
+
+- 高度要按**實際折行**後的行數給，不是按 `\r\n` 的個數。
+- 那一行也順便縮短了（`原因會顯示在托盤提示` → `原因見托盤提示`），
+  兩件事都做才不會換個字型或 DPI 又爆。
+
+分頁的內容區高度也要留餘裕：`kTabH = 300`，`TabCtrl_AdjustRect` 扣掉籤頭與內縮
+之後大約剩 267px，而三頁裡最高的一頁用到 250px（熱鍵頁的錯誤訊息行）。
+
 ---
 
 ## 5. 開發 / 驗證旗標
@@ -1341,6 +1638,7 @@ tools\ocr_snip_check.py out\CapWGC.exe  :: 框選 → OCR → 剪貼簿，讀回
 powershell -ExecutionPolicy Bypass -File out\gui_smoke.ps1     :: 全流程
 powershell -ExecutionPolicy Bypass -File out\gui_hud.ps1       :: 只看指示
 powershell -ExecutionPolicy Bypass -File out\gui_settings.ps1  :: 只看設定視窗
+powershell -ExecutionPolicy Bypass -File out\gui_settings_tabs.ps1 :: 三個分頁各拍一張（驗版面/標題）
 powershell -ExecutionPolicy Bypass -File out\gui_settings_pos.ps1 :: 量設定視窗有沒有出界
 powershell -ExecutionPolicy Bypass -File out\gui_settings_fit.ps1 :: 同上，另判 RESULT PASS/FAIL
 powershell -ExecutionPolicy Bypass -File out\gui_settings_fps.ps1 :: 展開幀率下拉，數項目 + 截圖
@@ -1430,8 +1728,8 @@ UTF-8 會當 ANSI 讀，中文字串的位元組會把結尾引號吃掉，錯�
 | **幀率選項** | 下拉 6 項：30 / 60 / 120 / 144 / 165 / 240，144 以上標「（高刷螢幕）」（`out/gui_settings_fps.ps1`，`fps items = 6`） |
 | **幀率閘門（數學）** | `--gatestest` 48 組全 PASS：239Hz→144 = 144.0、165Hz→144 = 144.0（舊的硬下界會是 119 / 82）、60→60 = 60.0 |
 | 幀率（實機，239Hz 螢幕 + 60fps 內容） | 目標 60 → 58.3 fps；144 → 90.5 fps；240 → 115.4 fps，`dropped=0`、`throttled≤2` |
-| 設定視窗 | 輸出資料夾、編碼器、幀率、品質、三個音源/游標開關、分軌勾選、**截圖存檔 + 圖片資料夾**、四個熱鍵欄位（OCR 模型欄位已移除，見 §11.4） |
-| 設定視窗落點 | 562,147 **476×652**（客戶區 460×613），`rcWork` 0,0 1600×852 → `RESULT PASS` 完全在工作區內 |
+| 設定視窗 | 三分頁（一般 / OCR / 熱鍵，見 §4.11）：一般＝輸出資料夾、編碼器、幀率、品質、三個音源/游標開關、分軌勾選；OCR＝截圖存檔 + 圖片資料夾 + PrtScn 接管；熱鍵＝五個欄位（OCR 模型欄位已移除，見 §11.4） |
+| 設定視窗落點 | 562,147 **476×364**，`rcWork` 0,0 1600×852 → `RESULT PASS` 完全在工作區內 |
 | 熱鍵文字往返 | `--hotkeytest` **28/28 PASS**（含 `Numpad7` / `VK%02X` / 別名 / 大小寫 / 空白） |
 | 熱鍵擷取（逐鍵） | `Ctrl+…` → `Ctrl+Shift+…` → `Ctrl+Shift+F7`，立即回饋正常 |
 | 熱鍵擷取（清除） | `Esc` → `（未設定）` |
@@ -1490,6 +1788,9 @@ loopback 的 keep-alive 仍在送靜音封包 —— 那正是 `docs/07` 那個�
 | 設定視窗開在螢幕外 | 標題列在 `y=-184`，視窗是 `WS_POPUP`、沒有工作列按鈕，**拖不回來** | 見 4.4：owner 是 0×0 時改用滑鼠所在螢幕的工作區，最後一律夾回 `rcWork` |
 | **QA 入口傳 `nullptr`，把 bug 遮掉了** | `--settings` 走的是「無 owner」那條路，置中正常；托盤走的是 0×0 owner 那條，出界。截圖驗過卻還是壞的 | QA 入口要模擬**真實**呼叫：`--settings` 改成建一個 0×0 owner 再開 |
 | **錄出來聲音比畫面早（嘴型對不上）** | 使用者用 PotPlayer 播，聲音早幾百毫秒；CLI 錄同一畫面卻是好的 | 音軌第一筆樣本的內容時刻是 `videoOrigin + gap`，但 muxer 放在 `dts=0` → 整條早 `gap`。逐條軌補 `+gap`（§4.7） |
+| **分頁標題空白／只剩一個字母／亂碼** | 分頁數量對、`SendMessage` 回成功、沒有錯誤碼，只有標題壞掉 | 沒有 `/DUNICODE` → `TabCtrl_InsertItem` 展開成 `TCM_INSERTITEMA`，寬字串被當 `char*` 讀。寫死 `TCM_INSERTITEMW`，並在 `CFLAGS` 補 `/DUNICODE /D_UNICODE`（§4.11.4） |
+| **`STATIC` 最後一行被切一半** | 用 `\r\n` 數行數給高度，但長的那行自己折行 → 實際多一行 | 高度按**折行後**的行數給，順便把過長的那句縮短（§4.11.5） |
+| **跨行程 `SendMessage` 帶指標的訊息** | `TCM_GETITEMRECT` 回傳的 `RECT` 是垃圾 → 合成點擊落到別的地方（實測點開了開始功能表，然後它蓋住待測視窗，看起來像「視窗沒出現」） | 指標不會跨行程搬。改用只回整數的訊息（`TCM_GETCURSEL`）驗證，切頁用鍵盤訊息而不是合成滑鼠 |
 | **只量 CLI 的同步數字** | CLI 的 `gap` 剛好抵掉素材源的 `PlaySound` 延遲，永遠顯示「對齊」，bug 藏了好幾輪 | 回歸測試必須同時量 CLI 與 GUI 並斷言一致（`verify_sync.sh`） |
 | 設定視窗的資料夾欄位是空的 | 開了才發現要重填 | EDIT 的文字在 `CreateWindowExW` 時就給，不要事後補 |
 | `LNK1104: 無法開啟 CapWGC.exe` | 看起來像編譯失敗 | exe 還在跑。GUI 也一樣，建置前先 `taskkill`（HANDOFF 已記） |
@@ -1532,7 +1833,7 @@ loopback 的 keep-alive 仍在送靜音封包 —— 那正是 `docs/07` 那個�
 2. **托盤上的目標記憶**。縮圖牆解決了「怎麼挑」，但每次 `Ctrl+Alt+W` 還是要
    重挑；應該記住上次的來源直接重錄。
 3. **多螢幕的目標選擇**。縮圖牆的「螢幕」分頁已經列得出每一顆螢幕，
-   但只有一顆時沒測到多螢幕的排版；`Ctrl+Alt+R` 也還是「游標所在那顆」。
+   但只有一顆時沒測到多螢幕的排版；「錄主螢幕」也還是「游標所在那顆」。
 4. ~~**縮圖牆的即時更新**~~ **已完成（2026-10-18 第七輪）**。清單 400ms
    重新比對（`hwnd` 為身分、不重排、保留選取），縮圖 120ms 分批補抓（每次
    上限 2 張、新出現的優先）。即時路徑不做螢幕擷取回退（會拍到自己），

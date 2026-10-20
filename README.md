@@ -15,7 +15,7 @@ The goal is Captura's feature set with LICEcap's startup cost and OBS's encoding
 - **Capture** — Windows.Graphics.Capture (WGC), so window/monitor capture keeps working
   across resolution changes and does not need a borderless window hack.
 - **Encode** — Media Foundation MFTs only (H.264 / HEVC / AV1), auto-selected by hardware
-  capability. FFmpeg is deliberately excluded: LGPL/GPL would poison the MIT license.
+  capability.
 - **Mux** — own MP4 writer (fragmented MP4, `avcC`/`hvcC`/`av1C`), including `edts/elst`
   and `tfdt` so audio delay is compensated instead of drifting.
 - **Audio** — WASAPI loopback and microphone → AAC. The GUI mixes them into one track;
@@ -31,17 +31,31 @@ The goal is Captura's feature set with LICEcap's startup cost and OBS's encoding
 | Audio | system loopback + microphone, mixed or separate tracks |
 | Screenshot | snip overlay, saves to file and clipboard |
 | OCR | in-process ONNX Runtime (PP-OCRv6), text straight to the clipboard |
-| Hotkeys | fully rebindable, persisted |
+| Window picker | thumbnail wall, live-refreshing, filters out cloaked windows |
+| Print Screen takeover | `PrtScn` replaces the Windows Snipping Tool shortcut (on by default) |
+| Settings | three tabs (general / OCR / hotkeys), all hotkeys rebindable and persisted |
 | Output | MP4 (fMP4), VFR |
 
 Default hotkeys (all editable in the settings window):
 
 | Action | Hotkey |
 |---|---|
-| Start / stop recording | `Ctrl+Alt+A` |
-| Screenshot | `Ctrl+Alt+X` |
-| Source picker | `Ctrl+Alt+W` |
-| Stop | `Ctrl+Alt+S` |
+| Screenshot / OCR | `PrtScn` |
+| Window picker | `Ctrl+Alt+W` |
+| Region / window recording | not bound — use the tray menu |
+| Record primary monitor | not bound — use the tray menu |
+| Stop | not bound — click the red square on the floating bar |
+
+Only two hotkeys are bound by default. Recording is a deliberate action, so it
+does not get a shortcut out of the box; bind one in Settings → 熱鍵 if you want it.
+Leaving a field empty is not a broken state — the tray menu and the floating bar
+remain full entry points.
+
+`PrtScn` works by turning off Windows 11's "Use the Print screen key to open
+Snipping Tool" (`HKCU\Control Panel\Keyboard\PrintScreenKeyForSnippingEnabled`),
+because Windows swallows the key before `RegisterHotKey` ever sees it. This is on
+by default; unchecking it in Settings → OCR restores the Windows behaviour and
+falls back to `Ctrl+Alt+X`. `Win+Shift+S` is unaffected either way.
 
 Settings and logs live in `%LOCALAPPDATA%\CapWGC\`.
 
@@ -121,7 +135,7 @@ MIT — see [LICENSE](LICENSE).
 ## 繁體中文
 
 CapWGC 是一個 Windows 錄屏與截圖工具：WGC 抓畫面、Media Foundation 硬體編碼、
-自寫的 MP4 muxer，**不用 FFmpeg**（避免 LGPL/GPL 污染 MIT）。
+自寫的 MP4 muxer。
 
 - 區域／視窗／螢幕錄影，H.264 / HEVC / AV1 自動選硬體編碼
 - 系統聲 + 麥克風（GUI 混成一軌，CLI 分軌方便量測）
