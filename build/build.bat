@@ -31,53 +31,112 @@ set "ROOT=%~dp0.."
 set "OUT=%ROOT%\out"
 if not exist "%OUT%" mkdir "%OUT%"
 
+rem ---------------------------------------------------------------------------
+rem Toolset detection, in order of preference:
+rem   1. already inside a developer shell (INCLUDE has the UCRT) - CI does this
+rem   2. one of the well-known vcvars64.bat paths
+rem   3. vswhere.exe, which knows where Visual Studio actually lives
+rem   4. no vcvars at all: set INCLUDE/LIB/PATH by hand
+rem
+rem Why not just call vcvars64.bat:
+rem   vcvars64.bat shells out to reg.exe (and to VsDevCmd, which calls it too).
+rem   In a sandboxed shell reg.exe is blocked, vcvars fails *partially* --
+rem   exit code 0, but INCLUDE/LIB never set -- and the build then dies with
+rem   "cannot open windows.h", which reads like a missing SDK rather than a
+rem   broken environment. INCLUDE is the honest test, not `where cl`: vcvars
+rem   puts cl on PATH before the reg.exe call that kills it.
+rem
+rem Why vswhere: the hardcoded paths below are a snapshot of a typical box.
+rem   They were wrong on the GitHub windows runner, where VS is not under any
+rem   of these names, so the build failed with "no MSVC toolset found" while
+rem   vcvars was sitting right there. vswhere ships with VS 2017+ and lives
+rem   outside the versioned layout, so it survives image renames.
+rem ---------------------------------------------------------------------------
+set "PF86=%ProgramFiles(x86)%"
+set "VSWHERE=%PF86%\Microsoft Visual Studio\Installer\vswhere.exe"
+set "VSINST="
+
+rem Is a usable toolset already on PATH? Two conditions, both required.
+rem
+rem The substring test alone is not enough: when INCLUDE is *undefined*,
+rem `!INCLUDE:ucrt=!` does not substitute, it returns the literal text
+rem "ucrt=" -- which is non-empty, so `if not "..."=="!INCLUDE!"` compares
+rem "ucrt=" against "" and reports a match. That false positive made this
+rem script claim "using existing developer environment" on a bare shell and
+rem then fail at `cl` with "'cl' is not recognized". Test `defined` first,
+rem and keep `where cl` because a half-initialised vcvars can leave INCLUDE
+rem set while leaving cl off PATH.
+set "TOOLSET_OK="
+if defined INCLUDE (
+  echo !INCLUDE! | findstr /i "ucrt" >nul && where cl >nul 2>nul && set "TOOLSET_OK=1"
+)
+
+if defined TOOLSET_OK (
+  echo [build] using existing developer environment
+  goto :toolset_ready
+)
+
 set "VCVARS="
 for %%P in (
-  "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-  "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat"
-  "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
-  "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
-) do (
-  if not defined VCVARS if exist %%P set "VCVARS=%%~P"
+  "%ProgramFiles%\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+  "%ProgramFiles%\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat"
+  "%ProgramFiles%\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+  "%ProgramFiles%\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+  "%PF86%\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+) do if not defined VCVARS if exist %%P set "VCVARS=%%~P"
+
+if not defined VSINST if exist "%VSWHERE%" (
+  for /f "usebackq tokens=*" %%I in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSINST=%%I"
 )
 
-rem vcvars can fail *silently*: it puts cl on PATH early, then dies on reg.exe,
-rem so `where cl` succeeds while INCLUDE is still empty. INCLUDE is the honest
-rem test -- a missing INCLUDE is exactly the "cannot open windows.h" symptom.
-set "CL_OK="
+if defined VSINST if not defined VCVARS if exist "%VSINST%\VC\Auxiliary\Build\vcvars64.bat" (
+  set "VCVARS=%VSINST%\VC\Auxiliary\Build\vcvars64.bat"
+)
+
 if defined VCVARS (
   call "%VCVARS%" >nul 2>nul
-  set "CHK=!INCLUDE!"
-  if not "!CHK:ucrt=!"=="!CHK!" set "CL_OK=1"
+  set "CL_OK="
+  if defined INCLUDE (
+    echo !INCLUDE! | findstr /i "ucrt" >nul && where cl >nul 2>nul && set "CL_OK=1"
+  )
+  if defined CL_OK (
+    echo [build] toolset ready via vcvars
+    goto :toolset_ready
+  )
 )
 
-if not defined CL_OK (
-  echo [build] vcvars unusable ^(reg.exe blocked or VS missing^) - setting env manually
-  set "MSVC="
-  for /d %%D in ("C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\MSVC\*") do (
-    if not defined MSVC set "MSVC=%%~fD"
-  )
-  if not defined MSVC for /d %%D in ("C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\*") do (
-    if not defined MSVC set "MSVC=%%~fD"
-  )
-  set "SDK="
-  for /d %%D in ("C:\Program Files (x86)\Windows Kits\10\Include\10.*") do set "SDK=%%~nxD"
-  if not defined MSVC (
-    echo [build] FAILED: no MSVC toolset found
-    exit /b 1
-  )
-  if not defined SDK (
-    echo [build] FAILED: no Windows SDK found
-    exit /b 1
-  )
-  set "KIT=C:\Program Files (x86)\Windows Kits\10"
-  rem ! not %: these are assigned inside this parenthesised block, and %VAR%
-  rem is expanded when the block is parsed -- i.e. before MSVC/SDK exist.
-  set "PATH=!MSVC!\bin\Hostx64\x64;!PATH!"
-  set "INCLUDE=!MSVC!\include;!KIT!\Include\!SDK!\ucrt;!KIT!\Include\!SDK!\shared;!KIT!\Include\!SDK!\um;!KIT!\Include\!SDK!\winrt;!KIT!\Include\!SDK!\cppwinrt"
-  set "LIB=!MSVC!\lib\x64;!KIT!\Lib\!SDK!\ucrt\x64;!KIT!\Lib\!SDK!\um\x64"
-  where cl >nul 2>nul || (echo [build] FAILED: cl still not found & exit /b 1)
+echo [build] vcvars unusable ^(reg.exe blocked, or VS missing^) - setting env manually
+set "MSVC="
+if defined VSINST if exist "%VSINST%\VC\Tools\MSVC" (
+  for /d %%D in ("%VSINST%\VC\Tools\MSVC\*") do if not defined MSVC set "MSVC=%%~fD"
 )
+if not defined MSVC for /d %%D in ("C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\MSVC\*") do (
+  if not defined MSVC set "MSVC=%%~fD"
+)
+if not defined MSVC for /d %%D in ("C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\*") do (
+  if not defined MSVC set "MSVC=%%~fD"
+)
+set "SDK="
+for /d %%D in ("%PF86%\Windows Kits\10\Include\10.*") do set "SDK=%%~nxD"
+if not defined MSVC (
+  echo [build] FAILED: no MSVC toolset found
+  echo [build]   vswhere: "%VSWHERE%"
+  if exist "%VSWHERE%" "%VSWHERE%" -latest -products * -property installationPath
+  exit /b 1
+)
+if not defined SDK (
+  echo [build] FAILED: no Windows SDK found under "%PF86%\Windows Kits\10\Include"
+  exit /b 1
+)
+set "KIT=%PF86%\Windows Kits\10"
+rem ! not %: these are assigned inside this parenthesised block, and %VAR%
+rem is expanded when the block is parsed -- i.e. before MSVC/SDK exist.
+set "PATH=!MSVC!\bin\Hostx64\x64;!PATH!"
+set "INCLUDE=!MSVC!\include;!KIT!\Include\!SDK!\ucrt;!KIT!\Include\!SDK!\shared;!KIT!\Include\!SDK!\um;!KIT!\Include\!SDK!\winrt;!KIT!\Include\!SDK!\cppwinrt"
+set "LIB=!MSVC!\lib\x64;!KIT!\Lib\!SDK!\ucrt\x64;!KIT!\Lib\!SDK!\um\x64"
+where cl >nul 2>nul || (echo [build] FAILED: cl still not found & exit /b 1)
+
+:toolset_ready
 echo [build] toolset ready
 
 set "TARGET=%~1"
@@ -142,7 +201,7 @@ if errorlevel 1 (echo [build] FAILED: dim_panel_test & exit /b 1)
 goto :done
 
 :toastclicktest
-rem Toast click harness: proves the "已儲存（點一下開啟）" toast actually runs
+rem Toast click harness: proves the "saved (click to open)" toast actually runs
 rem its action. Replacing the Shell balloon silently killed NIN_BALLOONUSERCLICK,
 rem so the title promised a click that only hid the toast. This drives real
 rem WM_LBUTTONDOWN / WM_RBUTTONDOWN into the toast window and counts callbacks.
