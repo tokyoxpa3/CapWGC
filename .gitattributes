@@ -1,0 +1,18 @@
+# 預設：交給 git 判斷二進位/文字，工作區用 LF
+* text=auto eol=lf
+
+# .bat 一定要 CRLF，而且是硬需求，不是風格問題：
+# cmd.exe 用 LF 結尾的 .bat 執行 `goto :label` 會跳到錯誤的位元組偏移，
+# 落在標籤「附近」，於是默默跑上一個 target 的區塊（見 build\build.bat 開頭）。
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+*.sh text eol=lf
+
+# 二進位：不要做換行轉換，也不要在 diff 裡顯示
+*.exe binary
+*.dll binary
+*.lib binary
+*.onnx binary
+*.png binary
+*.zip binary

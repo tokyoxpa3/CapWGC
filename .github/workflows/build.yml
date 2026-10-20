@@ -1,0 +1,142 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  # Keep in sync with build/package.bat's default. Only used for non-tag builds.
+  DEFAULT_VERSION: 0.1.0
+
+jobs:
+  build:
+    name: build (windows x64)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # models\*.onnx is gitignored (30MB of weights), so CI has to fetch it.
+      # prepare-models.bat falls back to huggingface.co when there is no
+      # paddlex cache, which on a fresh runner there never is.
+      - name: Fetch OCR models
+        shell: cmd
+        run: build\prepare-models.bat
+
+      - name: Build
+        shell: cmd
+        run: build\build.bat
+
+      # A green build is only meaningful if the artefacts are the ones we think
+      # they are. build.bat uses `exit /b 1` on every failure, so a missing exe
+      # here means the compile silently no-opped.
+      - name: Verify artefacts
+        shell: cmd
+        run: |
+          if not exist out\CapWGC.exe (echo missing CapWGC.exe & exit /b 1)
+          if not exist out\CapCli.exe (echo missing CapCli.exe & exit /b 1)
+          if not exist third_party\onnxruntime\lib\onnxruntime.dll (echo missing onnxruntime.dll & exit /b 1)
+          if not exist models\ppocr_det.onnx (echo missing det model & exit /b 1)
+          if not exist models\ppocr_rec.onnx (echo missing rec model & exit /b 1)
+          dir out\*.exe
+
+      # package.bat documents that the exe must not import the VC++ runtime,
+      # because that is the whole reason the zip is a single folder with no
+      # redistributable. Assert it instead of trusting the comment.
+      - name: Assert no VC++ runtime dependency
+        shell: cmd
+        run: |
+          set "VCVARS=%ProgramFiles%\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          if not exist "%VCVARS%" set "VCVARS=%ProgramFiles%\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+          call "%VCVARS%" >nul
+          dumpbin /dependents out\CapWGC.exe > dependents.txt
+          findstr /i "vcruntime msvcp" dependents.txt && (echo FAIL: VC++ runtime dependency found & exit /b 1)
+          echo OK: no VC++ runtime dependency
+
+      - name: Resolve version
+        id: ver
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -like 'refs/tags/v*') {
+            $v = $env:GITHUB_REF -replace '^refs/tags/v', ''
+          } else {
+            $v = $env:DEFAULT_VERSION
+          }
+          "value=$v" >> $env:GITHUB_OUTPUT
+          Write-Host "version = $v"
+
+      - name: Package
+        shell: cmd
+        run: build\package.bat ${{ steps.ver.outputs.value }}
+
+      - name: Upload artefact
+        uses: actions/upload-artifact@v4
+        with:
+          # Fixed name so the release job does not have to know the version
+          # before the build job has resolved it (outputs do not cross jobs).
+          name: dist
+          path: dist/*.zip
+          if-no-files-found: error
+
+  release:
+    name: publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+
+    steps:
+      - name: Download artefact
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      # Guard against the artefact name and the tag disagreeing -- that happens
+      # whenever the tag says v0.2.0 but package.bat still has 0.1.0 baked in.
+      - name: Check artefact matches tag
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}" -replace '^v', ''
+          $zip = Get-ChildItem dist -Filter *.zip | Select-Object -First 1
+          if (-not $zip) { throw "no zip in dist" }
+          if ($zip.Name -ne "CapWGC-$tag.zip") {
+            throw "artefact $($zip.Name) does not match tag $tag"
+          }
+          Write-Host "OK: $($zip.Name) ($([math]::Round($zip.Length/1MB,1)) MB)"
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
+          name: CapWGC ${{ github.ref_name }}
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          body: |
+            CapWGC ${{ github.ref_name }} — Windows 10/11 x64
+
+            Download `CapWGC-*.zip`, unzip anywhere and run `CapWGC.exe`.
+            No installer, no Python, no VC++ redistributable.
+
+            The zip contains the whole product:
+
+            | File | Role |
+            |---|---|
+            | `CapWGC.exe` | the app (lives in the tray, no main window) |
+            | `onnxruntime.dll` | OCR inference engine |
+            | `models\` | OCR weights (PP-OCRv6 det / rec / dict) |
+
+            Default hotkeys: `Ctrl+Alt+A` record · `Ctrl+Alt+X` snip ·
+            `Ctrl+Alt+W` picker · `Ctrl+Alt+S` stop. All rebindable in the
+            settings window. Settings and logs go to `%LOCALAPPDATA%\CapWGC\`.
+
+            Deleting `models\` only disables OCR; recording and screenshots
+            keep working.

@@ -1,0 +1,34 @@
+# CapWGC OCR 後端的 Python 依賴
+#
+# 為什麼要另開 venv：CapWGC 主體是純 C++（不依賴 Python）；只有 OCR 這條路
+# 需要 Python + PaddleOCR。把它隔離在獨立 venv 裡，好處是：
+#   1. 不想用 OCR 的人完全不必裝 Python。
+#   2. 這堆依賴（opencv/paddle）版本衝突很兇，隔離才不會弄壞使用者的環境。
+#
+# 安裝（Python 3.11，實測 3.11.9）：
+#   py -3.11 -m venv <任意路徑>\capwgc-ocr
+#   <任意路徑>\capwgc-ocr\Scripts\pip install -r tools\requirements-ocr.txt
+#
+# 然後把路徑填進 %LOCALAPPDATA%\CapWGC\settings.ini：
+#   [ocr]
+#   python=<任意路徑>/capwgc-ocr/Scripts/python.exe
+#
+# 版本為 2026-10 實測可用的一組；paddleocr/paddlex 是同一個生態圈，
+# 升版要一起升（單獨升 paddleocr 會踩到 paddlex 的介面變動）。
+
+paddleocr==3.7.0
+paddlex==3.7.2
+
+# CPU 路線。若要用 GPU 換成 onnxruntime-gpu==1.23.2。
+# 注意：裝了 onnxruntime-gpu 之後，ocr_cli.py 必須明確指定
+# providers=["CPUExecutionProvider"]，否則即使 device_type=cpu 也會
+# 自動跑 CUDA 且慢 4.7 倍（詳見 docs/10-ocr-cuda-investigation.md §8.3.1）。
+onnxruntime==1.31.0
+
+# 以下為 paddleocr 的間接依賴，釘住版本是為了可重現（否則每次裝到的
+# opencv/numpy 主版本可能不同，行為與效能都會變）。
+numpy==2.3.5
+opencv-contrib-python==4.10.0.84
+pillow==13.0.0
+pyclipper==1.4.0
+shapely==2.2.0

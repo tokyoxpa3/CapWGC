@@ -1,0 +1,48 @@
+# ---- 建置產物 ----
+out/
+build_out.log
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+
+# ---- Python ----
+# 產品路徑已經沒有 Python（OCR 改成行程內 ONNX，見 docs/11-ocr-deployment.md）。
+# tools/ocr_cli.py 留著只當「C++ 實作的數值參考」，需要的 venv 一律不進版控：
+# 它綁定本機的絕對路徑與 Python 版本，換一台機器就壞掉。
+venv/
+.venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+
+# ---- 模型權重 ----
+# 權重不進版控（det 9.4MB + rec 20MB）。但**字典要進**：它是模型的一部分
+# （index → 字元的對照表），少了它 CTC 解碼出來全是亂碼，而且只有 75KB。
+# 準備方式見 build\prepare-models.bat。
+*.onnx
+models/*.onnx
+.paddlex/
+
+# ---- 執行期 ----
+*.log
+*.mp4
+settings.ini
+
+# ---- IDE ----
+.vs/
+.vscode/
+*.user
+
+# ---- 打包產物 ----
+dist/
+
+# ---- 例外：third_party 的連結輸入 ----
+# 上面的 *.lib 是為了擋 out\ 裡的 .lib，但 onnxruntime.lib 是**連結輸入**，
+# 少了它 GUI 直接連不起來（unresolved external symbol OrtGetApiBase）。
+!third_party/onnxruntime/lib/*.lib
+
+# ---- 工具產生的專案資料 ----
+.workbuddy-ai/
