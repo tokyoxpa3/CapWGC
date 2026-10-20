@@ -410,7 +410,10 @@ int main(int argc, char** argv) {
     wc.lpfnWndProc = WndProc;
     wc.hInstance = GetModuleHandleA(nullptr);
     wc.lpszClassName = "CapWGCAnim";
-    wc.hCursor = LoadCursorA(nullptr, IDC_ARROW);
+    // 這個檔案刻意走 ANSI（WNDCLASSA / CreateWindowExA），但 IDC_ARROW 是資源 id，
+    // 在 /DUNICODE 下會展開成 MAKEINTRESOURCEW —— 配 LoadCursorA 就型別不符。
+    // 游標跟字串無關，直接用 W 版最省事。
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.hbrBackground = nullptr;
     RegisterClassA(&wc);
 
