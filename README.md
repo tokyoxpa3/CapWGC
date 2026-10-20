@@ -5,7 +5,7 @@
 A lightweight Windows screen recorder and screenshot tool built on Windows.Graphics.Capture,
 Media Foundation and a hand-written MP4 muxer. No FFmpeg, no installer, no runtime dependencies.
 
-> **Status:** 0.1.0 — recording, audio, GUI, screenshot and OCR all work end to end.
+> **Status:** 0.2.0 — recording, audio, GUI, screenshot and OCR all work end to end.
 > The GUI is intentionally minimal: tray + hotkeys + region picker. No timeline, no editor.
 
 ## Why another recorder
@@ -81,7 +81,7 @@ lines and are used by the scripts in `tools\`.
 ### Package
 
 ```bat
-build\package.bat 0.1.0    :: dist\CapWGC-0.1.0.zip
+build\package.bat 0.2.0    :: dist\CapWGC-0.2.0.zip
 ```
 
 The zip is the whole product: `CapWGC.exe`, `onnxruntime.dll`, `models\`. No installer.
@@ -142,5 +142,5 @@ CapWGC 是一個 Windows 錄屏與截圖工具：WGC 抓畫面、Media Foundatio
 - 截圖與 OCR（行程內 ONNX，不經 Python，不用裝任何東西）
 - 托盤常駐、熱鍵可自訂、無主視窗
 
-建置：`build\build.bat`，產物在 `out\`；打包：`build\package.bat 0.1.0`。
+建置：`build\build.bat`，產物在 `out\`；打包：`build\package.bat 0.2.0`。
 設計取捨與量測數據都在 `docs\`，建議先看 `HANDOFF.md`。

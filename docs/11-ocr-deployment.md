@@ -133,11 +133,11 @@ rem 應該看到 onnxruntime.dll 在 delay import 表裡
 
 ```bat
 build\package.bat
-rem -> dist\CapWGC-0.1.0\   +   dist\CapWGC-0.1.0.zip（31 MB）
+rem -> dist\CapWGC-0.2.0\   +   dist\CapWGC-0.2.0.zip（32 MB）
 ```
 
 腳本會先跑 `build.bat gui`，再把 exe、`onnxruntime.dll`、`models\` 三樣東西
-複製進 `dist\CapWGC-0.1.0\`，並用 PowerShell 寫一份 UTF-8（含 BOM）的
+複製進 `dist\CapWGC-0.2.0\`，並用 PowerShell 寫一份 UTF-8（含 BOM）的
 `README.txt`。**用 `echo` 寫中文會被 OEM 碼頁吃掉，所以那段是 PowerShell。**
 
 驗收方式不是「看資料夾裡有東西」，而是從乾淨目錄真的跑一次：
@@ -187,7 +187,7 @@ dumpbin -dependents out/CapWGC.exe | grep -i onnx        # 沒有輸出
 dumpbin -imports   out/CapWGC.exe | grep -i -A2 "delay"  # 看得到 onnxruntime.dll
 
 # 3. 打包內容齊全
-unzip -l dist/CapWGC-0.1.0.zip
+unzip -l dist/CapWGC-0.2.0.zip
 
 # 4. 端到端（含剪貼簿）
 python tools/ocr_snip_check.py
