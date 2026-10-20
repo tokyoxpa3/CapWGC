@@ -109,12 +109,14 @@ build\build.bat probe      :: encoder probe + mp4 checker
 `build.bat` locates the MSVC toolset itself, and falls back to setting `INCLUDE`/`LIB` by hand
 when `vcvars64.bat` cannot run. Output goes to `out\`.
 
-The icons are the project's only resources (`build\app.rc` → `build\app.ico` + `build\app_rec.ico`,
-both generated from `icon.jpg` by `tools\make_icon.py`), so the GUI target also runs `rc.exe` from
-the same SDK. `app.ico` holds nine resolutions; below 64px it uses the mark without the wordmark,
-which is unreadable at that size. `app_rec.ico` is the same tile with a red badge baked into the
-corner — the tray uses it while a capture is running. It is a second resource rather than a runtime
-overlay because compositing an icon onto a DIB does not reliably carry the source alpha.
+The icons are the project's only resources (`build\app.rc` → `build\app.ico` + `build\app_rec.ico`),
+so the GUI target also runs `rc.exe` from the same SDK. `tools\make_icon.py` draws them rather than
+cropping `icon.jpg`: that picture is a 490px banner with a film strip, an aperture, a play arrow, the
+letters "QA" and a wordmark all in one square, and shrunk to 16px every one of those becomes grey
+mush. The drawn mark is a dark tile with an aperture ring, corner brackets at 48px and up, and a
+plain bigger ring below that. `app_rec.ico` replaces the ring with a red disc and a white stop square
+while a capture is running; it is a second resource rather than a runtime overlay because compositing
+an icon onto a DIB does not reliably carry the source alpha.
 
 Other targets: `ocrtest`, `dimtest`, `balloontest`, `toastclicktest`, `prtsctest` — each is a
 small harness that pins one behaviour that used to break silently. They print `KEY=VALUE`

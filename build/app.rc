@@ -8,19 +8,19 @@
 //
 // Two icon resources, not one:
 //   IDI_APPICON  idle. Used for the exe, the window class, and the tray.
-//   IDI_APPREC   recording. Same tile with a red badge baked into the corner,
-//                used only by the tray while a capture is running. It is a
-//                second resource rather than a runtime overlay because
-//                DrawIconEx into a DIB does not reliably carry the source
-//                alpha - on some machines that yields a half-transparent tray
-//                icon, which is worse than no state indicator at all.
+//   IDI_APPREC   recording. The same tile with the aperture ring replaced by a
+//                red disc and a white stop square, used only by the tray while
+//                a capture is running. It is a second resource rather than a
+//                runtime overlay because DrawIconEx into a DIB does not
+//                reliably carry the source alpha - on some machines that
+//                yields a half-transparent tray icon, which is worse than no
+//                state indicator at all.
 //
 // rc.exe ships with the Windows SDK, which the build already needs for
 // windows.h, so this is one more tool invocation, not a new dependency.
 //
-// app.ico / app_rec.ico are generated from icon.jpg by tools\make_icon.py; do
-// not hand-edit them. Keep this file ASCII-only: rc.exe reads it in the OEM
-// codepage.
+// app.ico / app_rec.ico are drawn by tools\make_icon.py; do not hand-edit them.
+// Keep this file ASCII-only: rc.exe reads it in the OEM codepage.
 
 #define IDI_APPICON 101
 #define IDI_APPREC  102
