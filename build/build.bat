@@ -142,7 +142,12 @@ echo [build] toolset ready
 set "TARGET=%~1"
 if "%TARGET%"=="" set "TARGET=all"
 
-set "CFLAGS=/nologo /utf-8 /std:c++20 /EHsc /O2 /GL /DNDEBUG /W4 /WX- /permissive- /Zc:__cplusplus /MP"
+rem /DUNICODE /D_UNICODE: every call site already uses the explicit ...W API, but the
+rem commctrl convenience macros (TabCtrl_InsertItem, ListView_*, TreeView_* ...) expand
+rem to the A or W message depending on UNICODE. Without the define, TabCtrl_InsertItem
+rem becomes TCM_INSERTITEMA and reads a wide string as char* - the tab labels come out
+rem blank or as mojibake while SendMessage still reports success.
+set "CFLAGS=/nologo /utf-8 /std:c++20 /EHsc /O2 /GL /DNDEBUG /W4 /WX- /permissive- /Zc:__cplusplus /MP /DUNICODE /D_UNICODE"
 set "LTCG=/LTCG"
 
 if /i "%TARGET%"=="probe" goto :probe

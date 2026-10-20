@@ -16,7 +16,7 @@ setlocal enabledelayedexpansion
 
 set "ROOT=%~dp0.."
 set "VER=%~1"
-if "%VER%"=="" set "VER=0.1.0"
+if "%VER%"=="" set "VER=0.2.0"
 set "NAME=CapWGC-%VER%"
 set "DIST=%ROOT%\dist"
 set "STAGE=%DIST%\%NAME%"

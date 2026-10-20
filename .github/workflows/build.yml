@@ -13,7 +13,7 @@ permissions:
 
 env:
   # Keep in sync with build/package.bat's default. Only used for non-tag builds.
-  DEFAULT_VERSION: 0.1.0
+  DEFAULT_VERSION: 0.2.0
 
 jobs:
   build:
@@ -132,9 +132,15 @@ jobs:
             | `onnxruntime.dll` | OCR inference engine |
             | `models\` | OCR weights (PP-OCRv6 det / rec / dict) |
 
-            Default hotkeys: `Ctrl+Alt+A` record · `Ctrl+Alt+X` snip ·
-            `Ctrl+Alt+W` picker · `Ctrl+Alt+S` stop. All rebindable in the
-            settings window. Settings and logs go to `%LOCALAPPDATA%\CapWGC\`.
+            Default hotkeys: `PrtScn` snip / OCR · `Ctrl+Alt+W` picker.
+            Recording, screen and stop are unbound by default — start them
+            from the tray menu or the floating controls. All of them are
+            rebindable in the settings window. Settings and logs go to
+            `%LOCALAPPDATA%\CapWGC\`.
+
+            On first run CapWGC takes over `PrtScn` from the Windows Snipping
+            Tool (this is a `HKCU\Control Panel\Keyboard` setting, no admin
+            needed). Turning it off in Settings restores the previous value.
 
             Deleting `models\` only disables OCR; recording and screenshots
             keep working.
