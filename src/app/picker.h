@@ -23,6 +23,8 @@
 
 #include <windows.h>
 
+#include <functional>
+
 namespace app {
 
 struct PickResult {
@@ -37,13 +39,32 @@ struct PickResult {
     HWND hwnd = nullptr;         // 非空 = 選了視窗
     HMONITOR monitor = nullptr;  // 非空 = 選了整個螢幕
     RECT rect{};                 // 螢幕座標（HUD 用）
+
+    // 選擇器是被 onSysMsg 攔下來的（使用者按了全域熱鍵）。上面三個旗標都會是
+    // false，訊息本身放在 msg 裡，由呼叫端在 PickSource 返回之後自己處理 ——
+    // 那時選擇器已經關掉了，覆蓋層／錄影才不會截到它。
+    bool sysMsg = false;
+    MSG msg{};
 };
+
+// 選擇器開著時，呼叫端想攔的「系統訊息」。
+//
+// 為什麼需要這個 —— 這是 picker 的 modal 訊息迴圈的副作用：它自己跑
+// GetMessage/DispatchMessage，而全域熱鍵的 WM_HOTKEY 是送給主訊息窗的，
+// 會在這個迴圈裡被一起抽出來、一起丟掉。於是使用者**開著選擇器**時按
+// 截圖熱鍵完全沒反應 —— 功能不是壞了，是被吃掉了。
+//
+// 回傳 true = 這個訊息由呼叫端處理，picker 會立刻關掉自己（然後回傳結果）。
+// 回傳 false = 照正常流程走下去。
+using SysMsgFn = std::function<bool(const MSG&)>;
 
 // 縮圖會在顯示自己之前抓完：先顯示再抓，自己就擋在目標前面了。
 //
-// live = true（預設）：開啟後每 500ms 重掃視窗清單、每 100ms 補抓一批縮圖，
+// live = true（預設）：開啟後每 400ms 重掃視窗清單、每 120ms 補抓一批縮圖，
 // 視窗開了/關了/還原了都會自己跟上。live = false 只抓一次快照，是給 QA
 // 截圖用的（要可重現的畫面，不能被中途的刷新干擾）。
-PickResult PickSource(HWND owner, bool live = true);
+//
+// onSysMsg（可空）：見上面的 SysMsgFn。
+PickResult PickSource(HWND owner, bool live = true, SysMsgFn onSysMsg = {});
 
 } // namespace app

@@ -282,15 +282,24 @@ void Overlay::Finish(bool ok) {
 
 // 送出結果。這是框選模式的**唯一**出口：
 //   滑鼠放開、單擊選視窗、Enter、雙擊 —— 四條路都走這裡。
-// 一律用 defaultAction_（＝使用者在工具列上選的模式，預設是「截圖」），
-// 因為模式的選擇發生在「框選之前」，框完就只差送出。
+//
+// 兩種模式共用同一個出口，差別只在「有沒有動作可以選」：
+//   * 截圖 / OCR：一律用 defaultAction_（＝使用者在工具列上選的模式，預設
+//     「截圖」），因為模式的選擇發生在「框選之前」，框完就只差送出。
+//   * 錄影：沒有工具列、沒有動作，結果直接走 done_(ok, rect, win)。
+//
+// 這裡修過一次嚴重缺陷：原本第一行是 `if (!snip_ || !owner_) return;`，於是
+// **錄影模式的四條路全部靜默失敗** —— 拖曳框選放開沒反應、單擊視窗沒反應、
+// Enter 沒反應，覆蓋層卡在畫面上只能按 Esc。錄影模式看起來就像「功能沒做完」，
+// 原因其實是這一行守衛把結果吃掉了（Finish() 早就支援 done_ 那條分支）。
 void Overlay::Submit(const RECT& rect, HWND win) {
-    if (!snip_ || !owner_) return;
+    if (!owner_) return;
     pending_ = true;
     pendingOk_ = true;
     pendingRect_ = rect;
     pendingWin_ = win;
-    pendingAction_ = defaultAction_;
+    // 只有截圖模式需要「用哪個動作」；錄影模式留原值即可（Finish 不會讀）。
+    if (snip_) pendingAction_ = defaultAction_;
     PostMessageW(owner_, WM_OVERLAY_DONE, 0, 0);
 }
 
@@ -359,10 +368,15 @@ LRESULT CALLBACK Overlay::WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             self->Cancel();
             return 0;
         }
-        // Enter：用「目前選取的範圍」直接送出。框選模式下這就是「框好 →
-        // Enter」的快速路徑，不必再碰工具列。
-        if (w == VK_RETURN && self->hasSel_) {
-            self->Submit(self->sel_, nullptr);
+        // Enter：用「目前有效的範圍」直接送出。拖曳過就是那個矩形，沒拖過但
+        // 懸停在某個視窗上就是那個視窗 —— 框選與錄影兩種模式都成立
+        // （錄影模式下這就是「框好 → Enter」的快速路徑，不必再碰滑鼠）。
+        // 什麼都沒選就按 Enter 則維持原樣「什麼都不做」：這裡不能當成取消，
+        // 錄影時手滑按到 Enter 就整個覆蓋層消失，比沒反應更糟。
+        if (w == VK_RETURN) {
+            RECT rr{};
+            HWND win = nullptr;
+            if (self->EffectiveRect(&rr, &win)) self->Submit(rr, win);
             return 0;
         }
         // 截圖模式：Tab / 左右鍵切換工具列的模式（鍵盤也能選截圖或 OCR）。
@@ -378,7 +392,10 @@ LRESULT CALLBACK Overlay::WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         return 0;
     case WM_LBUTTONDBLCLK:
         // 雙擊 = 用目前模式送出（滑鼠版的快速路徑，跟 Enter 等價）。
-        if (self->snip_) {
+        // 這裡不再限定截圖模式：錄影模式的雙擊也應該等於「就用這個範圍開始錄」。
+        // （注意這個視窗類別沒有 CS_DBLCLKS，所以正常情況下第一下 WM_LBUTTONUP
+        //   就已經送出了 —— 這段是保險，不是主路徑。）
+        if (self->owner_) {
             RECT rr{};
             HWND win = nullptr;
             if (self->EffectiveRect(&rr, &win)) self->Submit(rr, win);

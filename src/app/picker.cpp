@@ -255,7 +255,8 @@ struct Item {
 
 class Picker {
 public:
-    explicit Picker(bool live) : live_(live) {}
+    Picker(bool live, SysMsgFn onSysMsg)
+        : live_(live), onSysMsg_(std::move(onSysMsg)) {}
     PickResult Run();
 
 private:
@@ -355,6 +356,15 @@ private:
            brAccentHi_ = nullptr, brLine_ = nullptr;
 
     PickResult result_;
+
+    // 開著的時候要攔的系統訊息（全域熱鍵）。空 = 不攔。
+    SysMsgFn onSysMsg_;
+    // 攔到的訊息。**不能**在訊息迴圈裡直接處理：處理的動作是「開截圖覆蓋層
+    // 或開始錄影」，那會建立新的視窗並進入另一個 modal 迴圈，而我們自己的
+    // 視窗還活著、縮圖還握在手裡 —— 疊在一起之後誰該關誰會變得很難講清楚。
+    // 所以先關掉自己、離開迴圈，再把訊息交出去（呼叫端在 Run() 返回之後處理）。
+    bool sysMsgHit_ = false;
+    MSG sysMsg_{};
 };
 
 // ============================================================================
@@ -1131,7 +1141,9 @@ void Picker::DrawFooter(HDC dc) {
     SetTextColor(dc, kSub);
     // 提示文字從「設定」按鈕右邊開始，才不會被按鈕壓住。
     RECT hint{btnSetup_.right + S(16), footer_.top, btnCancel_.left - S(12), footer_.bottom};
-    DrawTextW(dc, L"點一下選取，點兩下或按 Enter 開始錄影", -1, &hint,
+    // 第二句不是裝飾：選擇器開著的時候截圖熱鍵**仍然有效**（它會先關掉這個
+    // 視窗再截圖），但使用者不會知道 —— 沒有這行字，那條路等於不存在。
+    DrawTextW(dc, L"點一下選取，點兩下或按 Enter 開始錄影（截圖熱鍵仍可用）", -1, &hint,
               DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
 
     DrawButton(dc, btnSetup_, L"設定", false, hoverBtn_ == 3);
@@ -1515,25 +1527,54 @@ PickResult Picker::Run() {
         return PickResult{};
     }
 
+    // 這裡刻意**不用** GetMessage 為主迴圈，而是 PeekMessage + WaitMessage：
+    // 全域熱鍵的 WM_HOTKEY 是送給主訊息窗的，兩種迴圈都抽得到它，但我們要在
+    // 「使用者還開著選擇器」的當下就能決定要不要把它攔下來（見 onSysMsg_）。
+    //
+    // 攔到之後的順序是「關掉 picker → 結束迴圈 → 由呼叫端處理訊息」。
+    // 反過來（在這裡直接處理）等於在選擇器的訊息迴圈裡再開一個 modal，
+    // 而且螢幕上還蓋著選擇器 —— 截圖會截到它、框選會框到它。
     MSG msg{};
-    while (hwnd_ && GetMessageW(&msg, nullptr, 0, 0) > 0) {
-        TranslateMessage(&msg);
-        DispatchMessageW(&msg);
+    while (hwnd_) {
+        if (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            if (msg.message == WM_QUIT) break;   // 跟原本的 GetMessage 迴圈一致
+            if (onSysMsg_ && onSysMsg_(msg)) {
+                LogW(L"[pick] intercepted msg=0x%04X -> closing picker", msg.message);
+                sysMsgHit_ = true;
+                sysMsg_ = msg;
+                // 不要留腳印：這個訊息已經被我們消費掉了，外面不該再收到一次。
+                if (hwnd_) DestroyWindow(hwnd_);
+                break;
+            }
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        } else {
+            WaitMessage();
+        }
     }
 
     const PickResult r = result_;
     ReleaseThumbs();
     ReleaseResources();
-    LogW(L"[pick] end ok=%d region=%d settings=%d hwnd=%p mon=%p", r.ok ? 1 : 0,
-         r.region ? 1 : 0, r.settings ? 1 : 0, (void*)r.hwnd, (void*)r.monitor);
+    LogW(L"[pick] end ok=%d region=%d settings=%d hwnd=%p mon=%p",
+         r.ok ? 1 : 0, r.region ? 1 : 0, r.settings ? 1 : 0, (void*)r.hwnd, (void*)r.monitor);
+
+    // 攔到熱鍵這條路：PickResult 直接帶著那個訊息出去，三個旗標保持 false。
+    // 記在 result_ 之後才回傳，是為了讓上面那行 log 反映「使用者其實沒選東西」。
+    if (sysMsgHit_) {
+        PickResult s;
+        s.sysMsg = true;
+        s.msg = sysMsg_;
+        return s;
+    }
     return r;
 }
 
 } // namespace
 
-PickResult PickSource(HWND owner, bool live) {
+PickResult PickSource(HWND owner, bool live, SysMsgFn onSysMsg) {
     (void)owner;   // 置中基準是「滑鼠所在螢幕」，托盤的 0×0 owner 沒有意義
-    Picker p(live);
+    Picker p(live, std::move(onSysMsg));
     return p.Run();
 }
 

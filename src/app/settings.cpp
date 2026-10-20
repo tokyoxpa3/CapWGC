@@ -20,6 +20,7 @@
 namespace app {
 namespace {
 
+constexpr int IDC_TAB = 1000;
 constexpr int IDC_DIR_EDIT = 1001;
 constexpr int IDC_DIR_BROWSE = 1002;
 constexpr int IDC_CODEC = 1003;
@@ -145,9 +146,32 @@ struct DlgState {
     // 「用 PrtScn 取代 Windows 剪取工具」勾了沒。真正的登錄檔改動在呼叫端
     // （app::EngagePrtScn），這裡只是把使用者的意圖帶出去。
     bool wantPrtsc = false;
+
+    // ---- 分頁 ----
+    //
+    // 三個分頁是「同一批控制項 + 一個 Tab 控制項」：每個控制項建立時就掛到
+    // 所屬頁面，切頁時只做 ShowWindow，**不重建**。重建會把使用者的輸入、
+    // 熱鍵子類化、捲動位置全部弄掉，而且每次切頁都要重跑一次 SetWindowSubclass
+    // —— 那是這類重構最常見的坑。
+    HWND tab = nullptr;
+    std::vector<HWND> page[3];
+    int curPage = 0;
+    // 頁面內容的原點（client 座標）。由 TCM_ADJUSTRECT 算出來，不是寫死的：
+    // 分頁籤的高度跟字型、DPI 有關，寫死一個 y 在某些縮放比例下會壓到籤上。
+    int pageX = 0;
+    int pageY = 0;
 };
 
 DlgState* g_dlg = nullptr;
+
+// 建立控制項時「這一頁」是哪一頁。-1 = 不分頁（Tab 本身、確定/取消）。
+// 用全域而不是多傳一個參數：Child() 有三十幾個呼叫點，逐一改只會讓版面
+// 程式更難讀。
+int g_curPage = -1;
+
+// 分頁順序（使用者指定：一般 → OCR → 熱鍵）。
+const wchar_t* kPageNames[3] = {L"一般", L"OCR", L"熱鍵"};
+constexpr int kPageCount = 3;
 
 constexpr int kHotkeyCount = 5;
 const int kHotkeyIds[kHotkeyCount] = {IDC_HK_REGION, IDC_HK_PICKER, IDC_HK_SCREEN,
@@ -158,6 +182,10 @@ HWND Child(HWND parent, const wchar_t* cls, const wchar_t* text, DWORD style,
     HWND c = CreateWindowExW(0, cls, text, WS_CHILD | WS_VISIBLE | style, x, y, w, h,
                              parent, (HMENU)(INT_PTR)id, GetModuleHandleW(nullptr), nullptr);
     if (c && g_dlg && g_dlg->font) SendMessageW(c, WM_SETFONT, (WPARAM)g_dlg->font, TRUE);
+    // 掛到目前這一頁（見 DlgState::page 的說明）。
+    if (c && g_dlg && g_curPage >= 0 && g_curPage < kPageCount) {
+        g_dlg->page[g_curPage].push_back(c);
+    }
     return c;
 }
 
@@ -177,9 +205,16 @@ int ComboSel(HWND parent, int id) {
     return (int)SendDlgItemMessageW(parent, id, CB_GETCURSEL, 0, 0);
 }
 
+// 定義在下面（版面那一節）。這裡先宣告，是因為錯誤訊息要能跳回熱鍵頁。
+void ShowPage(HWND h, int page);
+
 void ShowHotkeyError(HWND h, const std::wstring& msg) {
     if (!g_dlg) return;
     g_dlg->hkError = msg;
+    // 錯誤訊息住在「熱鍵」那一頁。使用者可能正停在「一般」頁按確定，那時
+    // 這行字是隱藏的 —— 視窗不會關、又沒有任何看得見的理由，看起來像
+    // 「按確定沒反應」。所以有錯就跳回熱鍵頁。
+    if (!msg.empty()) ShowPage(h, 2);
     if (HWND e = GetDlgItem(h, IDC_HK_ERROR)) SetWindowTextW(e, msg.c_str());
 }
 
@@ -336,6 +371,20 @@ void ReadBack(HWND h, Settings* s) {
     }
 }
 
+// ---- 版面 ------------------------------------------------------------------
+//
+// 每個分頁的內容都用「相對於頁面原點」的座標寫，建立時才加上 pageX / pageY。
+// 這樣三個頁面可以各自從 (0,0) 排起，不必為了分頁籤的高度重算每一行 y。
+//
+// 頁面高度取三者最大（熱鍵頁最高，約 250px）。改版面時要確認最大的那一頁
+// 還塞得進 kTabH 扣掉籤頭的高度 —— 塞不進去不會有任何錯誤訊息，控制項只會
+// 被切掉，所以留了餘裕。
+constexpr int kTabX = 12;
+constexpr int kTabY = 12;
+constexpr int kTabW = 452;
+constexpr int kTabH = 300;
+constexpr int kPad = 4;    // 內容與分頁內緣的距離
+
 void BuildControls(HWND h, const Settings& s) {
     const int dpi = GetDpiForWindow(h);
     LOGFONTW lf{};
@@ -354,22 +403,63 @@ void BuildControls(HWND h, const Settings& s) {
     // 而使用者看到的是熱鍵欄位 —— 它必須跟勾選框說同一件事。
     g_dlg->wantPrtsc = (s.hotkeys.snip.vk == VK_SNAPSHOT && s.hotkeys.snip.mods == 0);
 
-    Child(h, L"STATIC", L"輸出資料夾", SS_LEFT, 16, 14, 200, 18, 0);
+    // ---- 分頁籤 ----
+    g_curPage = -1;   // 分頁籤本身不屬於任何一頁
+    HWND tab = Child(h, WC_TABCONTROLW, L"", WS_TABSTOP | WS_CLIPSIBLINGS, kTabX, kTabY,
+                     kTabW, kTabH, IDC_TAB);
+    g_dlg->tab = tab;
+    for (int i = 0; i < kPageCount; ++i) {
+        TCITEMW it{};
+        it.mask = TCIF_TEXT;
+        it.pszText = const_cast<LPWSTR>(kPageNames[i]);
+        // **一定要用 TCM_INSERTITEMW**，不能用 TabCtrl_InsertItem 巨集。
+        //
+        // 這個專案沒有定義 UNICODE（所有 API 都直接呼叫 ...W 版本），所以巨集
+        // 會展開成 TCM_INSERTITEMA（TCM_FIRST+7，W 版是 +62）。把 TCITEMW 的
+        // 寬字串指標交給 A 版處理，comctl32 會把它當 char* 讀：
+        //   「一般」→ 第一個 byte 就是 0x00 → 空字串
+        //   「OCR」 → 讀到 'O' 後面接 0x00 → 只剩 "O"
+        //   「熱鍵」→ 讀到 4 個 byte 才碰到 0 → 變成亂碼
+        // 症狀是「分頁名稱顯示異常」，但不會有任何錯誤碼 —— 訊息本身送得成功。
+        SendMessageW(tab, TCM_INSERTITEMW, (WPARAM)i, (LPARAM)&it);
+    }
+    // 內容原點用 TCM_ADJUSTRECT 算，不寫死：籤頭的高度跟字型／DPI 有關，
+    // 寫死一個 y 在某些縮放比例下會壓到籤上，或留下太大的空白。
+    RECT dr{};
+    GetClientRect(tab, &dr);
+    TabCtrl_AdjustRect(tab, FALSE, &dr);
+    MapWindowPoints(tab, h, reinterpret_cast<POINT*>(&dr), 2);
+    g_dlg->pageX = dr.left + kPad;
+    g_dlg->pageY = dr.top + kPad;
+
+    // 頁面內的座標 → 視窗座標，並掛到指定的那一頁（見 Child）。
+    auto P = [h](int page, const wchar_t* cls, const wchar_t* text, DWORD style, int x,
+                 int y, int w, int hh, int id) {
+        g_curPage = page;
+        HWND c = Child(h, cls, text, style, g_dlg->pageX + x, g_dlg->pageY + y, w, hh, id);
+        g_curPage = -1;
+        return c;
+    };
+
+    // ========================================================================
+    // 第一頁：一般（錄影）
+    // ========================================================================
+    P(0, L"STATIC", L"輸出資料夾", SS_LEFT, 0, 0, 200, 18, 0);
     // 文字要在建立時就給：用 SetDlgItemTextW 事後補會有一瞬間的空欄位，
     // 而且很容易忘（第一版就忘了，欄位一直是空的）。
-    Child(h, L"EDIT", s.outputDir.c_str(), WS_BORDER | ES_AUTOHSCROLL, 16, 34, 340, 24,
-          IDC_DIR_EDIT);
-    Child(h, L"BUTTON", L"瀏覽…", BS_PUSHBUTTON, 364, 34, 80, 24, IDC_DIR_BROWSE);
+    P(0, L"EDIT", s.outputDir.c_str(), WS_BORDER | ES_AUTOHSCROLL, 0, 20, 340, 24,
+      IDC_DIR_EDIT);
+    P(0, L"BUTTON", L"瀏覽…", BS_PUSHBUTTON, 348, 20, 80, 24, IDC_DIR_BROWSE);
 
-    Child(h, L"STATIC", L"編碼器", SS_LEFT, 16, 74, 100, 18, 0);
-    HWND cb = Child(h, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL, 16, 94, 220, 200,
-                    IDC_CODEC);
+    P(0, L"STATIC", L"編碼器", SS_LEFT, 0, 58, 100, 18, 0);
+    HWND cb = P(0, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL, 0, 78, 214, 200,
+                IDC_CODEC);
     for (const wchar_t* it : kCodecItems) SendMessageW(cb, CB_ADDSTRING, 0, (LPARAM)it);
     SendMessageW(cb, CB_SETCURSEL, (WPARAM)(s.codec < 4 ? s.codec : 0), 0);
 
-    Child(h, L"STATIC", L"幀率", SS_LEFT, 256, 74, 100, 18, 0);
-    HWND fb = Child(h, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL, 256, 94, 170, 200,
-                    IDC_FPS);
+    P(0, L"STATIC", L"幀率", SS_LEFT, 232, 58, 100, 18, 0);
+    HWND fb = P(0, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL, 232, 78, 196, 200,
+                IDC_FPS);
     for (int f : kFpsItems) {
         wchar_t b[32];
         // 高刷選項直接標在字串上，不另外擠一行說明 —— 對話框沒有多餘的垂直空間，
@@ -384,20 +474,20 @@ void BuildControls(HWND h, const Settings& s) {
     for (int i = 0; i < kFpsCount; ++i) if (kFpsItems[i] == s.fps) fsel = i;
     SendMessageW(fb, CB_SETCURSEL, (WPARAM)fsel, 0);
 
-    Child(h, L"STATIC", L"品質", SS_LEFT, 16, 134, 60, 18, 0);
+    P(0, L"STATIC", L"品質", SS_LEFT, 0, 118, 60, 18, 0);
     wchar_t qv[16];
     swprintf_s(qv, L"%d", s.quality);
-    Child(h, L"STATIC", qv, SS_LEFT, 64, 134, 60, 18, IDC_QUALITY_VAL);
+    P(0, L"STATIC", qv, SS_LEFT, 48, 118, 60, 18, IDC_QUALITY_VAL);
 
-    HWND tb = Child(h, L"msctls_trackbar32", L"", TBS_HORZ | TBS_AUTOTICKS, 16, 154, 340, 32,
-                    IDC_QUALITY);
+    HWND tb = P(0, L"msctls_trackbar32", L"", TBS_HORZ | TBS_AUTOTICKS, 0, 138, 428, 32,
+                IDC_QUALITY);
     SendMessageW(tb, TBM_SETRANGE, TRUE, MAKELPARAM(30, 100));
     SendMessageW(tb, TBM_SETTICFREQ, 10, 0);
     SendMessageW(tb, TBM_SETPOS, TRUE, s.quality);
 
-    Child(h, L"BUTTON", L"系統聲音", BS_AUTOCHECKBOX, 16, 200, 110, 22, IDC_AUDIO_SYS);
-    Child(h, L"BUTTON", L"麥克風", BS_AUTOCHECKBOX, 136, 200, 90, 22, IDC_AUDIO_MIC);
-    Child(h, L"BUTTON", L"錄下游標", BS_AUTOCHECKBOX, 236, 200, 110, 22, IDC_CURSOR);
+    P(0, L"BUTTON", L"系統聲音", BS_AUTOCHECKBOX, 0, 184, 110, 22, IDC_AUDIO_SYS);
+    P(0, L"BUTTON", L"麥克風", BS_AUTOCHECKBOX, 120, 184, 90, 22, IDC_AUDIO_MIC);
+    P(0, L"BUTTON", L"錄下游標", BS_AUTOCHECKBOX, 220, 184, 110, 22, IDC_CURSOR);
     CheckDlgButton(h, IDC_AUDIO_SYS, s.audioSystem ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(h, IDC_AUDIO_MIC, s.audioMic ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(h, IDC_CURSOR, s.captureCursor ? BST_CHECKED : BST_UNCHECKED);
@@ -405,37 +495,31 @@ void BuildControls(HWND h, const Settings& s) {
     // 分軌是給剪輯用的：檔案裡除了混音軌之外，每個音源再各留一條（標成
     // 「不要預設播」，所以一般播放器仍然只播混音軌）。預設關 —— 開了檔案
     // 會大一截，而且多數人只是錄完直接播。
-    Child(h, L"BUTTON", L"保留分軌音源（給剪輯用，檔案較大）", BS_AUTOCHECKBOX,
-          16, 226, 300, 22, IDC_AUDIO_SEP);
+    P(0, L"BUTTON", L"保留分軌音源（給剪輯用，檔案較大）", BS_AUTOCHECKBOX, 0, 210, 420,
+      22, IDC_AUDIO_SEP);
     CheckDlgButton(h, IDC_AUDIO_SEP, s.separateTracks ? BST_CHECKED : BST_UNCHECKED);
 
-    // ---- 截圖 / OCR ----
+    // ========================================================================
+    // 第二頁：OCR（截圖 / OCR 相關）
+    // ========================================================================
     //
-    // 這一段刻意很短：真正需要設定的東西只有「截圖要不要順便存檔」與「存到
+    // 這一頁刻意很短：真正需要設定的東西只有「截圖要不要順便存檔」與「存到
     // 哪裡」。預設動作（截圖 or OCR）不放這裡，而是記住使用者上一次在工具列上
     // 選了什麼 —— 那才是使用者調這個值的地方，進來一次就懂了。
-    Child(h, L"STATIC", L"截圖 / OCR（熱鍵進入後，上方工具列可切換）", SS_LEFT, 16, 256,
-          430, 18, 0);
-    Child(h, L"BUTTON", L"截圖時也存一份（檔案總管可直接貼上）", BS_AUTOCHECKBOX,
-          16, 278, 420, 22, IDC_SNIP_SAVE);
+    P(1, L"STATIC", L"截圖 / OCR（熱鍵進入後，上方工具列可切換）", SS_LEFT, 0, 0, 430,
+      18, 0);
+    P(1, L"BUTTON", L"截圖時也存一份（檔案總管可直接貼上）", BS_AUTOCHECKBOX, 0, 24, 420,
+      22, IDC_SNIP_SAVE);
     CheckDlgButton(h, IDC_SNIP_SAVE, s.snipSaveFile ? BST_CHECKED : BST_UNCHECKED);
 
     // 圖片專用資料夾。留空 = 輸出資料夾底下的 Snip\（見 Settings::SnipDir）。
     // 之所以獨立一欄而不是「跟影片放一起」：截圖通常只是過渡產物，分開之後
     // 整個資料夾可以一次清掉，不會連影片一起誤刪。
-    Child(h, L"STATIC", L"圖片資料夾（留空 = 輸出資料夾\\Snip）", SS_LEFT, 16, 304,
-          400, 18, 0);
-    Child(h, L"EDIT", s.snipDir.c_str(), WS_BORDER | ES_AUTOHSCROLL, 16, 324, 340, 24,
-          IDC_SNIP_DIR);
-    Child(h, L"BUTTON", L"瀏覽…", BS_PUSHBUTTON, 364, 324, 80, 24, IDC_SNIP_DIR_BROWSE);
+    P(1, L"STATIC", L"圖片資料夾（留空 = 輸出資料夾\\Snip）", SS_LEFT, 0, 54, 400, 18, 0);
+    P(1, L"EDIT", s.snipDir.c_str(), WS_BORDER | ES_AUTOHSCROLL, 0, 74, 340, 24,
+      IDC_SNIP_DIR);
+    P(1, L"BUTTON", L"瀏覽…", BS_PUSHBUTTON, 348, 74, 80, 24, IDC_SNIP_DIR_BROWSE);
 
-    // ---- 熱鍵 ----
-    //
-    // 這裡本來還有一塊「OCR 模型」路徑。**已移除**：那只是覆寫模型目錄的
-    // 逃生門（給「模型放在網路磁碟」這種情況），但一般使用者的模型就在
-    // exe 旁邊的 models\，這個欄位對他們只有兩個效果 —— 看起來像在選版本
-    // （其實不是，換版本是換檔案、不是改路徑），以及手動改壞之後 OCR 默默
-    // 失效。真的需要換模型目錄的情境太罕見，不值得占用設定畫面的版面。
     // ---- PrtScn 接管 ----
     //
     // 這是一個「會改到系統設定」的選項，所以必須在畫面上講清楚，不能藏在
@@ -448,42 +532,87 @@ void BuildControls(HWND h, const Settings& s) {
     // RegisterHotKey 回成功但收不到 WM_HOTKEY；設成 0 才收得到。
     // 所以「接管」這件事必然包含改系統設定，那就必須是一個看得見的開關。
     const bool taken = app::PrtScnOwned();
-    Child(h, L"BUTTON", L"用 PrtScn 取代 Windows 剪取工具（截圖 / OCR）",
-          BS_AUTOCHECKBOX | WS_TABSTOP, 16, 366, 446, 20, IDC_PRTSN_TAKE);
+    P(1, L"BUTTON", L"用 PrtScn 取代 Windows 剪取工具（截圖 / OCR）",
+      BS_AUTOCHECKBOX | WS_TABSTOP, 0, 112, 430, 20, IDC_PRTSN_TAKE);
     if (g_dlg->wantPrtsc) {
         CheckDlgButton(h, IDC_PRTSN_TAKE, BST_CHECKED);
     }
-    Child(h, L"STATIC",
-          taken ? L"目前由 CapWGC 接管。取消勾選會還原 Windows 的 PrtScn。"
-                : L"勾選會關閉 Windows 11 的「使用 PrtScn 開啟剪取工具」"
-                  L"（Win+Shift+S 不受影響），並把 PrtScn 綁給截圖 / OCR。",
-          SS_LEFT, 32, 386, 430, 32, IDC_PRTSN_NOTE);
+    P(1, L"STATIC",
+      taken ? L"目前由 CapWGC 接管。取消勾選會還原 Windows 的 PrtScn。"
+            : L"預設開啟。會關閉 Windows 11 的「使用 PrtScn 開啟剪取工具」"
+              L"（Win+Shift+S 不受影響），並把 PrtScn 綁給截圖 / OCR。",
+      SS_LEFT, 16, 132, 414, 34, IDC_PRTSN_NOTE);
 
-    Child(h, L"STATIC", L"熱鍵（點欄位後直接按組合鍵）", SS_LEFT, 16, 432, 300, 18, 0);
+    // OCR 引擎本身沒有可調的東西（模型固定在 exe 旁邊的 models\），所以這一頁
+    // 只說明「它在那裡、壞了看哪裡」。留白比多一個不能用的欄位好。
+    //
+    // 高度要留給「實際折行後」的行數，不是 `\r\n` 的個數：這裡的三行字裡，中間
+    // 那行在 430px 寬下會自己折成兩行，所以總共是 4 行。原本給 56px（＝3 行）
+    // 會把最後一行切成一半 —— 而且 STATIC 不會回報「字被切掉」，看起來就像
+    // 排版壞了。要嘛加高、要嘛把那行縮短，這裡兩件都做（見下面那句）。
+    P(1, L"STATIC",
+      L"OCR 引擎：模型固定放在程式旁邊的 models\\，不需要設定。\r\n"
+      L"工具列的「OCR」是灰色＝引擎沒載入（原因見托盤提示，只提示一次）。\r\n"
+      L"辨識結果直接進剪貼簿，不開面板、不落地成檔案。",
+      SS_LEFT, 0, 176, 444, 74, 0);
+
+    // ========================================================================
+    // 第三頁：熱鍵
+    // ========================================================================
+    //
+    // 這裡本來還有一塊「OCR 模型」路徑。**已移除**：那只是覆寫模型目錄的
+    // 逃生門（給「模型放在網路磁碟」這種情況），但一般使用者的模型就在
+    // exe 旁邊的 models\，這個欄位對他們只有兩個效果 —— 看起來像在選版本
+    // （其實不是，換版本是換檔案、不是改路徑），以及手動改壞之後 OCR 默默
+    // 失效。真的需要換模型目錄的情境太罕見，不值得占用設定畫面的版面。
+    P(2, L"STATIC", L"熱鍵（點欄位後直接按組合鍵）", SS_LEFT, 0, 0, 300, 18, 0);
+    // 顯示順序和 hk[] / kHotkeyIds[] 的索引是**兩件事**，別混在一起。
+    // 最常用的排最上面（「視窗清單」連托盤單擊都會走，改動頻率最高）。
+    // kHkOrder 存的是「原始索引」：HotkeyProc 的 dwRefData 拿到的也是原始索引，
+    // 所以排序只影響畫面，寫回 settings 的對應關係完全不受影響。
+    static const int kHkOrder[kHotkeyCount] = {1, 0, 2, 3, 4};
     static const wchar_t* kHkLabels[kHotkeyCount] = {
-        L"選區域錄影 / 拖曳框選", L"視窗清單（縮圖）", L"錄主螢幕", L"停止",
+        L"視窗清單（縮圖）", L"選區域錄影 / 拖曳框選", L"錄主螢幕", L"停止",
         L"截圖 / OCR"};
-    for (int i = 0; i < kHotkeyCount; ++i) {
-        const int y = 454 + i * 28;
-        Child(h, L"STATIC", kHkLabels[i], SS_LEFT, 16, y + 3, 140, 18, 0);
-        HWND e = Child(h, L"EDIT", HotkeyText(g_dlg->hk[i]).c_str(),
-                       WS_BORDER | ES_READONLY | ES_CENTER | WS_TABSTOP, 160, y, 180, 24,
-                       kHotkeyIds[i]);
+    for (int row = 0; row < kHotkeyCount; ++row) {
+        const int i = kHkOrder[row];
+        const int y = 24 + row * 28;
+        P(2, L"STATIC", kHkLabels[row], SS_LEFT, 0, y + 3, 140, 18, 0);
+        HWND e = P(2, L"EDIT", HotkeyText(g_dlg->hk[i]).c_str(),
+                   WS_BORDER | ES_READONLY | ES_CENTER | WS_TABSTOP, 148, y, 180, 24,
+                   kHotkeyIds[i]);
         if (e) SetWindowSubclass(e, HotkeyProc, (UINT_PTR)kHotkeyIds[i], (DWORD_PTR)i);
     }
 
     // 這行提示是必要的，不是裝飾：Win 當修飾鍵時，Win 的 keydown 會被 shell
     // 先吃掉（連帶彈出開始功能表），應用層只收得到「Shift+Win」這種半截組合，
     // 後面那個真正的鍵永遠不會到 —— 實測 Win+Shift+P 停在 Shift+Win+…。
-    Child(h, L"STATIC",
-          L"Esc 或 Backspace 清除（＝不綁熱鍵）。除了 PrtScn，至少需要一個修飾鍵；"
-          L"建議用 Ctrl / Alt / Shift，Win 組合會被系統先接走。\r\n"
-          L"被其他程式佔用的組合，會在按確定後提示。",
-          SS_LEFT, 16, 600, 446, 54, IDC_HINT);
-    Child(h, L"STATIC", L"", SS_LEFT, 16, 656, 446, 18, IDC_HK_ERROR);
+    P(2, L"STATIC",
+      L"Esc 或 Backspace 清除（＝不綁熱鍵）。除了 PrtScn，至少需要一個修飾鍵；"
+      L"建議用 Ctrl / Alt / Shift，Win 組合會被系統先接走。\r\n"
+      L"被其他程式佔用的組合，會在按確定後提示。",
+      SS_LEFT, 0, 172, 430, 54, IDC_HINT);
+    P(2, L"STATIC", L"", SS_LEFT, 0, 232, 430, 18, IDC_HK_ERROR);
 
-    Child(h, L"BUTTON", L"確定", BS_DEFPUSHBUTTON, 288, 678, 84, 28, IDOK);
-    Child(h, L"BUTTON", L"取消", BS_PUSHBUTTON, 380, 678, 84, 28, IDCANCEL);
+    // ---- 共用按鈕 ----
+    // 放在分頁外面：三頁共用同一組確定／取消，切頁時按鈕不會跳位置。
+    g_curPage = -1;
+    Child(h, L"BUTTON", L"確定", BS_DEFPUSHBUTTON, 288, kTabY + kTabH + 12, 84, 28, IDOK);
+    Child(h, L"BUTTON", L"取消", BS_PUSHBUTTON, 380, kTabY + kTabH + 12, 84, 28, IDCANCEL);
+
+    ShowPage(h, 0);
+}
+
+// 切換分頁：只做 Show / Hide，不重建控制項（見 DlgState::page 的說明）。
+void ShowPage(HWND h, int page) {
+    if (!g_dlg || page < 0 || page >= kPageCount) return;
+    g_dlg->curPage = page;
+    for (int p = 0; p < kPageCount; ++p) {
+        const int cmd = (p == page) ? SW_SHOW : SW_HIDE;
+        for (HWND c : g_dlg->page[p]) ShowWindow(c, cmd);
+    }
+    if (g_dlg->tab) TabCtrl_SetCurSel(g_dlg->tab, page);
+    InvalidateRect(h, nullptr, TRUE);
 }
 
 // ---- 選資料夾 --------------------------------------------------------------
@@ -582,6 +711,22 @@ LRESULT CALLBACK DlgProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_CREATE:
         BuildControls(h, *g_dlg->s);
         return 0;
+    case WM_NOTIFY: {
+        // 分頁切換。注意這是**一般視窗**（不是 dialog），所以 WM_NOTIFY 直接
+        // 送到這裡；IsDialogMessageW 不會替我們處理它。
+        const NMHDR* nh = reinterpret_cast<const NMHDR*>(l);
+        if (nh && nh->idFrom == IDC_TAB && nh->code == TCN_SELCHANGE) {
+            const int sel = TabCtrl_GetCurSel(g_dlg->tab);
+            if (sel >= 0) {
+                ShowPage(h, sel);
+                // 焦點原本在舊頁面的控制項上（例如熱鍵欄位）→ 那個控制項剛被
+                // 藏起來，焦點會掉到視窗本身。移到分頁籤上，鍵盤才不會「消失」。
+                HWND focus = GetFocus();
+                if (focus && !IsWindowVisible(focus)) SetFocus(g_dlg->tab);
+            }
+        }
+        return 0;
+    }
     case WM_HSCROLL:
         if ((HWND)l == GetDlgItem(h, IDC_QUALITY)) {
             wchar_t b[16];
@@ -627,7 +772,7 @@ LRESULT CALLBACK DlgProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             // 必須同步 —— 不然使用者會勾了接管、欄位卻還顯示 Ctrl+Alt+X，
             // 然後不知道哪一個才是對的。
             const bool on = IsDlgButtonChecked(h, IDC_PRTSN_TAKE) == BST_CHECKED;
-            g_dlg->hk[4] = on ? Hotkey{0, VK_SNAPSHOT} : Hotkeys::Default().snip;
+            g_dlg->hk[4] = on ? Hotkey{0, VK_SNAPSHOT} : SnipFallbackHotkey();
             RefreshHotkeyBox(4);
             g_dlg->wantPrtsc = on;
 
@@ -740,13 +885,21 @@ bool HotkeyFromText(const std::wstring& text, Hotkey* out) {
     return HotkeyUsable(hk);
 }
 
-// 預設值刻意只給**兩個**（2026-10-20 改）：
+// 預設值刻意只給**兩個**（2026-10-20 改，同日再把截圖換成 PrtScn）：
 //   截圖 / OCR、選擇視窗
 //
 // 理由：錄影是「謹慎行為」—— 佔空間、而且通常是錄給別人看，所以錄影本身
 // 不該靠一組記不住的熱鍵觸發。真正天天用、值得佔用一個全域熱鍵的是
 // 「看到什麼截什麼」，以及「把主視窗叫出來」。其餘三個留空，需要的人自己
 // 在設定裡指定。
+//
+// 截圖預設＝**PrtScn**（2026-10-20 改，原本 Ctrl+Alt+X）。這是「用 PrtScn 取代
+// Windows 剪取工具」預設開啟的落地方式：
+//   * 預設值就是 PrtScn → 啟動時看到 snip 是 PrtScn 且還沒接管，就自動接管
+//     （見 main.cpp 的 AutoEngagePrtScn）。
+//   * **已經自己改過熱鍵的使用者完全不受影響**：ini 裡有 [hotkeys] snip 那一行，
+//     Load() 逐鍵覆蓋，值還是他的；接管旗標也還在原本的狀態。
+//   * 曾經在設定視窗取消勾選的人，ini 裡是 `snip=Ctrl+Alt+X`，同樣不會被翻回來。
 //
 // 留空（vk == 0）不是「壞掉」：托盤選單、主視窗、錄影中的漂浮控件都還是
 // 完整的入口，只是沒有鍵盤捷徑。
@@ -756,11 +909,18 @@ bool HotkeyFromText(const std::wstring& text, Hotkey* out) {
 Hotkeys Hotkeys::Default() {
     Hotkeys k;
     k.picker = Hotkey{MOD_CONTROL | MOD_ALT, 'W'};
-    // X 不在上面幾個的字母裡，而且 Ctrl+Alt+X 在 Windows 上沒有系統佔用。
-    k.snip = Hotkey{MOD_CONTROL | MOD_ALT, 'X'};
+    // PrtScn 是唯一允許「沒有修飾鍵」的鍵（見 HotkeyUsable 的說明）：它不參與
+    // 打字，而且使用者的直覺就是「按一下 PrtScn 截圖」。
+    k.snip = Hotkey{0, VK_SNAPSHOT};
     // region / screen / stop 留空。
     return k;
 }
+
+// 關閉 PrtScn 接管之後，截圖要退回哪一組。
+//
+// 不能寫成 `Hotkeys::Default().snip` —— 預設值現在就是 PrtScn，那樣「取消接管」
+// 會把熱鍵指回同一個鍵，等於沒放掉，而且按下去不會有反應（Windows 又拿回去了）。
+Hotkey SnipFallbackHotkey() { return Hotkey{MOD_CONTROL | MOD_ALT, 'X'}; }
 
 bool Hotkeys::Duplicate(std::wstring* which) const {
     const Hotkey all[5] = {region, picker, screen, stop, snip};
@@ -1102,13 +1262,17 @@ bool PrtScnOwned() { return ReadFlag(L"owned"); }
 void PrtScnSetOwned(bool owned) { WriteFlag(L"owned", owned); }
 bool PrtScnWasAbsent() { return ReadFlag(L"was_absent"); }
 void PrtScnRememberAbsent(bool absent) { WriteFlag(L"was_absent", absent); }
+bool PrtScnChosen() { return ReadFlag(L"chosen"); }
+void PrtScnSetChosen(bool chosen) { WriteFlag(L"chosen", chosen); }
 
 bool ShowSettingsDialog(HWND owner, Settings* s, bool* wantPrtsc) {
     if (!s) return false;
 
     INITCOMMONCONTROLSEX icc{};
     icc.dwSize = sizeof(icc);
-    icc.dwICC = ICC_BAR_CLASSES | ICC_STANDARD_CLASSES;
+    // ICC_TAB_CLASSES 是分頁控制項（SysTabControl32）需要的 —— 少了它
+    // CreateWindowExW 會回 null，而且錯誤碼只會是「找不到視窗類別」。
+    icc.dwICC = ICC_BAR_CLASSES | ICC_STANDARD_CLASSES | ICC_TAB_CLASSES;
     InitCommonControlsEx(&icc);
 
     WNDCLASSEXW wc{};
@@ -1125,9 +1289,10 @@ bool ShowSettingsDialog(HWND owner, Settings* s, bool* wantPrtsc) {
     g_dlg = &st;
 
     const DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE;
-    // 高度看最後一個控制項（取消鈕在 y=678、高 28 → 706）再加一點下緣留白。
-    // 原本 652，加 PrtScn 接管那一段（約 68）之後重排。
-    RECT rc{0, 0, 476, 720};
+    // 客戶區大小：分頁籤 12,12 起、452×300，按鈕在 y=324 高 28（→352），
+    // 下緣留 12。改成三分頁之後高度從 720 掉到 364 —— 這是分頁唯一的實際好處：
+    // 使用者不必再把視窗拖高才看得到下面的欄位。
+    RECT rc{0, 0, 476, 364};
     AdjustWindowRectEx(&rc, style, FALSE, WS_EX_CONTROLPARENT);
     const int w = rc.right - rc.left;
     const int h = rc.bottom - rc.top;

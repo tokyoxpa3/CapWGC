@@ -47,6 +47,12 @@ std::wstring HotkeyText(const Hotkey& hk);
 // 解析不出來就回 false（呼叫端保留原值，不要留半套狀態）。
 bool HotkeyFromText(const std::wstring& s, Hotkey* out);
 
+// 關閉 PrtScn 接管時，截圖要退回的那一組（Ctrl+Alt+X）。
+//
+// 不能直接用 Hotkeys::Default().snip —— 預設值本身就是 PrtScn，那樣「取消
+// 接管」會把熱鍵指回同一個鍵，等於沒放掉。
+Hotkey SnipFallbackHotkey();
+
 struct Hotkeys {
     Hotkey region;   // 拖曳框選 / 單擊選視窗（錄影）
     Hotkey picker;   // 視窗清單（縮圖牆）
@@ -171,6 +177,16 @@ void PrtScnSetOwned(bool owned);
 // 只在 PrtScnOwned() 為真時有意義。
 bool PrtScnWasAbsent();
 void PrtScnRememberAbsent(bool absent);
+
+// 使用者是否已經對「PrtScn 接管」做過**明確的決定**（勾選或取消勾選）。
+//
+// 為什麼需要這個旗標：「預設開啟」聽起來只是一個預設值，但實際上它要動系統
+// 設定，而舊版的預設值是 Ctrl+Alt+X。只看 ini 有沒有值分不出兩件事：
+//   * 使用者從來沒碰過（ini 是舊版寫的 Ctrl+Alt+X）→ 應該遷移到 PrtScn
+//   * 使用者刻意把截圖鍵設成 Ctrl+Alt+X → 不該被翻掉
+// 所以另外記一個「問過了」的記號：沒有這個記號＝還沒問過，可以遷移。
+bool PrtScnChosen();
+void PrtScnSetChosen(bool chosen);
 
 // 原生控制項的設定視窗，modal。回傳 true = 使用者按了「確定」（並已寫回 *s）。
 //

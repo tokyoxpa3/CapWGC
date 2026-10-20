@@ -62,6 +62,10 @@ constexpr UINT WM_APP_TRAY = WM_APP + 1;
 constexpr UINT WM_APP_REC_DONE = WM_APP + 2;
 constexpr UINT WM_APP_OCR = WM_APP + 3;       // OCR 引擎事件（見 OcrEngine::HandleMessage）
 constexpr UINT WM_APP_SNIP_OCR_TEST = WM_APP + 4;   // QA：啟動後自動進入「截圖＋OCR」
+// 「請開始截圖」（wParam 非 0 = 直接選 OCR）。托盤選單用它，而不是直接呼叫
+// BeginSnip：選擇器開著的時候，這個訊息會被 picker 的訊息迴圈攔下來，等它
+// 關掉之後才真正執行 —— 見 BeginWindowPicker。
+constexpr UINT WM_APP_SNIP = WM_APP + 5;
 constexpr UINT TRAY_ID = 1;
 constexpr UINT_PTR TIMER_TICK = 1;
 
@@ -409,6 +413,7 @@ bool EngagePrtScn(App& a, std::wstring* why) {
 
     // 1. 先把「截圖 / OCR」綁到 PrtScn 並註冊。這一步成功只代表「鑰匙孔是
     //    我們的」，還不代表按得下去（見上面的說明）。
+    const app::Hotkeys prev = a.settings.hotkeys;   // 步驟 2 失敗時要還原成這個
     app::Hotkeys next = a.settings.hotkeys;
     next.snip = app::Hotkey{0, VK_SNAPSHOT};
     std::wstring bad;
@@ -420,12 +425,19 @@ bool EngagePrtScn(App& a, std::wstring* why) {
     // 2. 讓 Windows 不要再把 PrtScn 送給剪取工具。
     if (st != app::PrtScnState::Disabled && !app::PrtScnTake()) {
         // 改不到系統設定 → 把熱鍵退回原本的，不要留下「按了沒反應」的狀態。
-        ApplyHotkeys(a, a.settings.hotkeys, nullptr);
+        //
+        // 這裡一定要用上面存下來的 prev，不能用 a.settings.hotkeys ——
+        // ApplyHotkeys 成功時已經把 members 換成 next 了，拿它去「還原」等於
+        // 還原成同一個值，熱鍵就停在一個按了沒反應的 PrtScn 上（實測過）。
+        ApplyHotkeys(a, prev, nullptr);
         if (why) *why = L"沒有權限修改系統設定（可能被群組原則鎖住）";
         return false;
     }
 
     a.settings.Save();
+    // 記下「問過了」：之後啟動就不會再自動遷移（使用者若又改回別的組合鍵，
+    // 那是他的選擇，不該每次開機被翻回 PrtScn）。
+    app::PrtScnSetChosen(true);
     Log("prtsc: engaged (reg was %d)", (int)st);
     return true;
 }
@@ -439,11 +451,14 @@ bool ReleasePrtScn(App& a, std::wstring* why) {
         if (!ok && why) *why = L"還原系統設定失敗，PrScn 可能仍由 CapWGC 接管";
     }
 
-    // 熱鍵退回預設的截圖鍵（不是清空 —— 使用者還是要能截圖）。
+    // 熱鍵退回 Ctrl+Alt+X（不是清空 —— 使用者還是要能截圖）。
+    // 注意這裡不能用 Hotkeys::Default().snip：預設值現在就是 PrtScn。
     app::Hotkeys next = a.settings.hotkeys;
-    next.snip = app::Hotkeys::Default().snip;
+    next.snip = app::SnipFallbackHotkey();
     ApplyHotkeys(a, next, nullptr);
     a.settings.Save();
+    // 使用者明確關掉了接管 —— 這也是「問過了」，之後啟動不要再自動接管。
+    app::PrtScnSetChosen(true);
     Log("prtsc: released ok=%d", ok ? 1 : 0);
     return ok;
 }
@@ -458,7 +473,7 @@ void ReconcilePrtScn(App& a) {
         app::PrtScnSetOwned(false);
         if (a.settings.hotkeys.snip.vk == VK_SNAPSHOT) {
             app::Hotkeys h = a.settings.hotkeys;
-            h.snip = app::Hotkeys::Default().snip;
+            h.snip = app::SnipFallbackHotkey();
             ApplyHotkeys(a, h, nullptr);
             a.settings.Save();
         }
@@ -469,6 +484,88 @@ void ReconcilePrtScn(App& a) {
         Log("prtsc: value vanished, clearing owned flag");
         app::PrtScnSetOwned(false);
     }
+}
+
+// 預設接管 PrtScn。
+//
+// 「用 PrtScn 取代 Windows 剪取工具」現在是**預設開啟**的，但這件事不能只靠
+// 一個預設值：Windows 11 預設會把 PrtScn 交給剪取工具，而 RegisterHotKey 在
+// 那個狀態下**回成功、卻永遠收不到 WM_HOTKEY**（見 settings.h 的實測記錄）。
+// 也就是說「只把熱鍵預設成 PrtScn」會得到一個看起來正常、按下去完全沒反應的
+// 程式 —— 那正是這個功能最惡毒的失敗模式。所以啟動時要主動把系統設定接過來。
+//
+// 三種情況要分清楚：
+//
+//   1. 全新安裝（ini 不存在）→ snip 預設就是 PrtScn → 直接接管。
+//   2. 從舊版升級（ini 裡是舊預設 Ctrl+Alt+X，或截圖鍵是空的）→ 那是「從來
+//      沒改過」的樣子，遷移到 PrtScn 並接管。使用者不會因此失去什麼：舊的
+//      組合鍵不是他選的。
+//   3. 使用者自己設過別的組合（例如 Ctrl+Shift+S）→ **不動**。尊重明確的選擇
+//      比貫徹預設值重要；他要換成 PrtScn 就自己在設定裡勾。
+//
+// 判斷「有沒有自己設過」不能只看 ini 有沒有值（舊版存檔一定會寫一行），所以
+// 另外記一個 [prtsc] chosen 記號：有這個記號＝問過了，不再自動遷移。
+void AutoEngagePrtScn(App& a) {
+    if (app::PrtScnOwned()) {
+        app::PrtScnSetChosen(true);
+        return;
+    }
+
+    const app::Hotkey snip = a.settings.hotkeys.snip;
+    const bool isPrtsc = (snip.vk == VK_SNAPSHOT && snip.mods == 0);
+
+    if (!isPrtsc) {
+        // 不是 PrtScn。分兩種：已經問過 → 放手；沒問過 → 看看是不是「沒改過」。
+        if (app::PrtScnChosen()) {
+            Log("prtsc: auto-engage skipped (user chose a different key)");
+            return;
+        }
+        const app::Hotkey oldDefault = app::SnipFallbackHotkey();
+        if (snip.set() && !snip.same(oldDefault)) {
+            // 使用者自己設了別的組合 → 尊重它，並記下「問過了」。
+            app::PrtScnSetChosen(true);
+            Log("prtsc: auto-engage skipped (custom snip hotkey %ls)",
+                app::HotkeyText(snip).c_str());
+            return;
+        }
+        // 舊預設或空的 → 遷移到新預設。
+        app::Hotkeys h = a.settings.hotkeys;
+        h.snip = app::Hotkey{0, VK_SNAPSHOT};
+        ApplyHotkeys(a, h, nullptr);
+        a.settings.Save();
+        Log("prtsc: migrated snip hotkey to PrtScn (was %ls)",
+            snip.set() ? app::HotkeyText(snip).c_str() : L"unset");
+    }
+
+    const app::PrtScnState st = app::PrtScnQuery();
+    if (st == app::PrtScnState::Error) {
+        Log("prtsc: auto-engage skipped (registry unreadable)");
+        return;
+    }
+    if (st == app::PrtScnState::Disabled) {
+        // 系統設定已經是「不給剪取工具」——可能上次是我們改的但 ini 被清掉了。
+        // 補記 owned，這樣使用者關閉接管時才還原得回去。
+        app::PrtScnSetOwned(true);
+        app::PrtScnSetChosen(true);
+        Log("prtsc: auto-engage adopted existing disabled state");
+        return;
+    }
+
+    std::wstring why;
+    if (EngagePrtScn(a, &why)) {
+        app::PrtScnSetChosen(true);
+        Log("prtsc: auto-engaged (default on)");
+        return;
+    }
+    Log("prtsc: auto-engage FAILED: %s", U8(why).c_str());
+    // 接管失敗（被別的程式佔用、群組原則鎖住）→ 退回一個真的按得下去的鍵。
+    // 不彈提示：這是預設行為，不是使用者按了什麼，一則看不懂的警告只會讓人
+    // 以為程式壞了；設定視窗裡看得到目前的狀態。
+    app::Hotkeys h = a.settings.hotkeys;
+    h.snip = app::SnipFallbackHotkey();
+    ApplyHotkeys(a, h, nullptr);
+    a.settings.Save();
+    app::PrtScnSetChosen(true);
 }
 
 // ---- 錄製 -----------------------------------------------------------------
@@ -610,11 +707,43 @@ void BeginSelection(App& a);
 void BeginWindowPicker(App& a) {
     if (a.mode != Mode::Idle) return;
     a.mode = Mode::Picking;
-    const app::PickResult r = app::PickSource(a.msgwnd);
+    // 選擇器開著的期間要讓「截圖 / OCR」還能用。
+    //
+    // 這件事不是自動成立的：全域熱鍵的 WM_HOTKEY 是送給主訊息窗的，而
+    // picker 有自己的 modal 訊息迴圈，那個訊息會在它的迴圈裡被抽出來、
+    // DispatchMessage 給主訊息窗，然後被「mode != Idle」的判斷默默丟掉。
+    // 使用者看到的就是「開著選擇視窗的時候按截圖完全沒反應」。
+    //
+    // 所以這裡明確把 snip 熱鍵接回來。**只接 snip**：其他幾組（選區域、
+    // 錄主螢幕、選擇視窗）在選擇器裡都有等價的入口（分頁與卡片），再攔一次
+    // 只會變成「按了卻跳出兩個東西」。
+    const app::PickResult r = app::PickSource(
+        a.msgwnd, /*live=*/true, [&a](const MSG& m) {
+            // 兩個入口都要接：熱鍵（WM_HOTKEY）與托盤的「截圖 / OCR」
+            // （WM_APP_SNIP）。只接熱鍵的話，托盤那條路在選擇器開著時仍然
+            // 會被 mode != Idle 擋掉，變成「選單可以點、點了沒反應」。
+            (void)a;
+            if (m.message == WM_HOTKEY) return (int)m.wParam == HOTKEY_SNIP;
+            if (m.message == WM_APP_SNIP) return true;
+            return false;
+        });
     a.mode = Mode::Idle;
-    Log("picker done ok=%d region=%d settings=%d hwnd=%p mon=%p rect=%ld,%ld,%ld,%ld",
-        r.ok ? 1 : 0, r.region ? 1 : 0, r.settings ? 1 : 0, (void*)r.hwnd, (void*)r.monitor,
-        r.rect.left, r.rect.top, r.rect.right, r.rect.bottom);
+    Log("picker done ok=%d region=%d settings=%d sysmsg=%d hwnd=%p mon=%p rect=%ld,%ld,%ld,%ld",
+        r.ok ? 1 : 0, r.region ? 1 : 0, r.settings ? 1 : 0, r.sysMsg ? 1 : 0, (void*)r.hwnd,
+        (void*)r.monitor, r.rect.left, r.rect.top, r.rect.right, r.rect.bottom);
+    // 攔到的熱鍵：選擇器已經關掉了，現在才處理 —— 這樣截圖拍到的是原本的
+    // 桌面，不會把選擇器自己拍進去。
+    //
+    // 用 PostMessage 而不是直接呼叫 WndProc：我們現在還在原本那個 WM_HOTKEY
+    // 的處理函式裡面（BeginWindowPicker 就是它叫的），直接重入會變成
+    // 「熱鍵 → 開 picker → picker 攔到熱鍵 → 再進一次熱鍵處理」的巢狀堆疊，
+    // 出問題時很難看出是怎麼繞回來的。丟回佇列讓它跑一次乾淨的。
+    if (r.sysMsg) {
+        Log("picker -> replay msg=0x%04X w=%llu", r.msg.message,
+            (unsigned long long)r.msg.wParam);
+        PostMessageW(a.msgwnd, r.msg.message, r.msg.wParam, r.msg.lParam);
+        return;
+    }
     // 按了「設定」：picker 已經關掉了，現在才是開設定視窗的時機。順序反過來
     // 的話設定視窗會變成 picker 的 owner，關掉設定時 picker 也會一起走。
     if (r.settings) {
@@ -1040,13 +1169,21 @@ void ShowTrayMenu(App& a) {
     const std::wstring mStop = L"停止\t" + app::HotkeyText(hk.stop);
     const std::wstring mSnip = L"截圖 / OCR\t" + app::HotkeyText(hk.snip);
 
-    AppendMenuW(m, MF_STRING | (busy ? MF_GRAYED : 0), IDM_REGION, mRegion.c_str());
+    // 「選擇視窗」放第一位：它是最常用的入口（托盤單擊也是它），而且它不
+    // 會立刻開始做任何事 —— 先選來源、再決定要錄什麼，順序上就該排最前面。
+    // 錄影類的三項排在後面，需要「已經想清楚要錄哪一塊」才會點。
     AppendMenuW(m, MF_STRING | (busy ? MF_GRAYED : 0), IDM_PICKER, mPicker.c_str());
+    AppendMenuW(m, MF_STRING | (busy ? MF_GRAYED : 0), IDM_REGION, mRegion.c_str());
     AppendMenuW(m, MF_STRING | (busy ? MF_GRAYED : 0), IDM_SCREEN, mScreen.c_str());
     AppendMenuW(m, MF_STRING | (rec ? 0 : MF_GRAYED), IDM_STOP, mStop.c_str());
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(m, MF_STRING | (busy ? MF_GRAYED : 0), IDM_SNIP, mSnip.c_str());
-    AppendMenuW(m, MF_STRING | (rec ? MF_GRAYED : 0), IDM_SNIP_OCR, L"截圖後直接 OCR");
+    // 「截圖 / OCR」在選擇器開著的時候**不變灰**：那正是需求裡「選視窗時不要
+    // 禁止截圖 / OCR」的托盤那一半。實際執行會排到選擇器關掉之後（見
+    // WM_APP_SNIP 的處理），所以不會出現「兩個 modal 疊在一起」。
+    const bool snipBusy = (a.mode != Mode::Idle && a.mode != Mode::Picking);
+    AppendMenuW(m, MF_STRING | (snipBusy ? MF_GRAYED : 0), IDM_SNIP, mSnip.c_str());
+    AppendMenuW(m, MF_STRING | (snipBusy ? MF_GRAYED : 0), IDM_SNIP_OCR,
+                L"截圖後直接 OCR");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING | (busy ? MF_GRAYED : 0), IDM_SETTINGS, L"設定…");
     AppendMenuW(m, MF_STRING, IDM_RESETBAR, L"重設控件位置");
@@ -1077,11 +1214,17 @@ void ShowTrayMenu(App& a) {
         StopRecording(a);
         break;
     case IDM_SNIP:
-        if (a.mode == Mode::Idle) BeginSnip(a, false);
+        // 一律走訊息而不是直接呼叫：選擇器開著時，這則訊息會被它的訊息迴圈
+        // 攔下來，等選擇器關掉之後才真正執行（見 BeginWindowPicker）。
+        if (a.mode == Mode::Idle || a.mode == Mode::Picking) {
+            PostMessageW(a.msgwnd, WM_APP_SNIP, 0, 0);
+        }
         break;
     case IDM_SNIP_OCR:
         // 托盤的「截圖並取字」：這次進來就選在 OCR，但**不**寫回設定。
-        if (a.mode == Mode::Idle) BeginSnip(a, true);
+        if (a.mode == Mode::Idle || a.mode == Mode::Picking) {
+            PostMessageW(a.msgwnd, WM_APP_SNIP, 1, 0);
+        }
         break;
     case IDM_SETTINGS:
         if (a.mode == Mode::Idle) OpenSettings(a);
@@ -1164,6 +1307,16 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_APP_OCR:
         // OCR 引擎的結果與就緒通知（都在這個 UI 執行緒被叫）。
         a->ocr.HandleMessage(w, l);
+        return 0;
+
+    case WM_APP_SNIP:
+        // 托盤的「截圖 / OCR」。wParam 非 0 = 直接選 OCR。
+        //
+        // 走訊息而不是直接呼叫 BeginSnip，是為了讓**選擇器開著時**也能用：
+        // picker 有自己的 modal 訊息迴圈，它會攔下這則訊息、關掉自己，再把
+        // 訊息放回來 —— 那時才是真正可以截圖的時機（見 BeginWindowPicker）。
+        if (a->mode == Mode::Idle) BeginSnip(*a, w != 0);
+        else Log("snip ignored (mode=%d)", (int)a->mode);
         return 0;
 
     case WM_APP_SNIP_OCR_TEST:
@@ -1944,10 +2097,13 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
     TrayAdd(app);
     // 熱鍵全部來自設定（settings.ini 的 [hotkeys]）。註冊失敗不能靜默：
     // 使用者只會覺得「按了沒反應」，然後以為程式壞了。
-    const std::wstring badHotkey = RegisterAll(app.msgwnd, app.settings.hotkeys);
-    // ini 說「PrtScn 是我們的」，但登錄值已經被改掉（系統還原、使用者自己
-    // 關掉、別的程式改回來）——這種不同步要在啟動時就攤平，不要留著。
+    //
+    // 順序：先對帳（ini 說接管著但登錄值被改掉 → 放手）→ 再決定要不要自動
+    // 接管（預設開啟）→ 最後才註冊熱鍵。反過來的話會先註冊一個「按了沒反應」
+    // 的 PrtScn，接管成功之後才補上第二輪註冊。
     ReconcilePrtScn(app);
+    AutoEngagePrtScn(app);
+    const std::wstring badHotkey = RegisterAll(app.msgwnd, app.settings.hotkeys);
     SetTimer(app.msgwnd, TIMER_TICK, 250, nullptr);
 
     // 啟動提示：**只列真的按得下去的鍵**。
