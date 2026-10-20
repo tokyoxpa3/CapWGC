@@ -4,6 +4,9 @@
 
 #include "settings.h"
 
+#include "i18n.h"
+#include "ui.h"   // ui::LoadAppIcon（視窗圖示）
+
 #include <commctrl.h>
 #include <shlobj.h>
 
@@ -43,6 +46,12 @@ constexpr int IDC_SNIP_DIR = 1032;
 constexpr int IDC_SNIP_DIR_BROWSE = 1033;
 constexpr int IDC_PRTSN_TAKE = 1034;
 constexpr int IDC_PRTSN_NOTE = 1035;
+constexpr int IDC_LANG = 1036;
+
+// 換語言之後重建整個頁面（見 RebuildForLanguage）。用自訂訊息而不是直接
+// 呼叫：切換語言的通知是那個下拉選單自己送來的，不能在自己的通知處理序裡
+// 把自己 DestroyWindow 掉。
+constexpr UINT WM_APP_RELANG = WM_APP + 1;
 
 const wchar_t* kCodecItems[] = {L"自動（AV1 > HEVC > H.264）", L"AV1", L"HEVC", L"H.264"};
 // 幀率是「上限」不是「保證」：WGC 的送幀速度跟螢幕刷新率綁在一起，60Hz 的
@@ -170,6 +179,8 @@ DlgState* g_dlg = nullptr;
 int g_curPage = -1;
 
 // 分頁順序（使用者指定：一般 → OCR → 熱鍵）。
+// 名稱在這裡是**原文**，建立分頁籤時才過 i18n::T —— 語系可以在設定視窗
+// 開著的期間切換，寫死翻譯後的結果就換不掉了。
 const wchar_t* kPageNames[3] = {L"一般", L"OCR", L"熱鍵"};
 constexpr int kPageCount = 3;
 
@@ -275,7 +286,7 @@ LRESULT CALLBACK HotkeyProc(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR,
             // 使用者只會覺得「按了沒反應」。已記在 docs/09 的踩坑表。
             if (mods & MOD_WIN) {
                 ShowHotkeyError(GetParent(h),
-                                L"Win 組合會被系統接走，抓不到；請改用 Ctrl / Alt / Shift");
+                                i18n::T(L"Win 組合會被系統接走，抓不到；請改用 Ctrl / Alt / Shift"));
                 return 0;
             }
             std::wstring t;
@@ -295,12 +306,12 @@ LRESULT CALLBACK HotkeyProc(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR,
         }
         if (vk == VK_F12) {
             // F12 被核心偵錯器保留，RegisterHotKey 一定失敗
-            ShowHotkeyError(GetParent(h), L"F12 是系統保留鍵，請換一個");
+            ShowHotkeyError(GetParent(h), i18n::T(L"F12 是系統保留鍵，請換一個"));
             return 0;
         }
         if (mods == 0 && vk != VK_SNAPSHOT) {
             ShowHotkeyError(GetParent(h),
-                            L"熱鍵至少要有一個修飾鍵（Ctrl / Alt / Shift）");
+                            i18n::T(L"熱鍵至少要有一個修飾鍵（Ctrl / Alt / Shift）"));
             return 0;
         }
         // Win 當修飾鍵在這裡是「無聲死路」：shell 會在按鍵送到前景視窗前就接走
@@ -310,7 +321,7 @@ LRESULT CALLBACK HotkeyProc(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR,
         // 實測 Win+Shift+P 停在 Shift+Win+…，已記在 docs/09 的踩坑表。
         if (mods & MOD_WIN) {
             ShowHotkeyError(GetParent(h),
-                            L"Win 組合會被系統接走，抓不到；請改用 Ctrl / Alt / Shift");
+                            i18n::T(L"Win 組合會被系統接走，抓不到；請改用 Ctrl / Alt / Shift"));
             return 0;
         }
 
@@ -357,6 +368,8 @@ void ReadBack(HWND h, Settings* s) {
     s->separateTracks = IsDlgButtonChecked(h, IDC_AUDIO_SEP) == BST_CHECKED;
     s->snipSaveFile = IsDlgButtonChecked(h, IDC_SNIP_SAVE) == BST_CHECKED;
     s->snipDir = GetText(h, IDC_SNIP_DIR);
+    const int l = ComboSel(h, IDC_LANG);
+    if (l >= 0 && l < i18n::LanguageCount()) s->lang = i18n::Languages()[l].code;
 
     // PrtScn 接管：勾選＝要 PrtScn 給截圖用。這裡只把「意圖」記進 hotkeys
     // （snip 綁上 PrtScn），**真正的系統設定在呼叫端才改** —— 設定視窗不該
@@ -382,7 +395,9 @@ void ReadBack(HWND h, Settings* s) {
 constexpr int kTabX = 12;
 constexpr int kTabY = 12;
 constexpr int kTabW = 452;
-constexpr int kTabH = 300;
+// 300 → 320：多了「介面語言」那一行。高度改大會動到視窗尺寸（見
+// ShowSettingsDialog 的 476×384），兩邊必須一起改，否則按鈕會被切掉。
+constexpr int kTabH = 320;
 constexpr int kPad = 4;    // 內容與分頁內緣的距離
 
 void BuildControls(HWND h, const Settings& s) {
@@ -411,7 +426,7 @@ void BuildControls(HWND h, const Settings& s) {
     for (int i = 0; i < kPageCount; ++i) {
         TCITEMW it{};
         it.mask = TCIF_TEXT;
-        it.pszText = const_cast<LPWSTR>(kPageNames[i]);
+        it.pszText = const_cast<LPWSTR>(i18n::T(kPageNames[i]));
         // **一定要用 TCM_INSERTITEMW**，不能用 TabCtrl_InsertItem 巨集。
         //
         // 這個專案沒有定義 UNICODE（所有 API 都直接呼叫 ...W 版本），所以巨集
@@ -444,40 +459,47 @@ void BuildControls(HWND h, const Settings& s) {
     // ========================================================================
     // 第一頁：一般（錄影）
     // ========================================================================
-    P(0, L"STATIC", L"輸出資料夾", SS_LEFT, 0, 0, 200, 18, 0);
+    P(0, L"STATIC", i18n::T(L"輸出資料夾"), SS_LEFT, 0, 0, 200, 18, 0);
     // 文字要在建立時就給：用 SetDlgItemTextW 事後補會有一瞬間的空欄位，
     // 而且很容易忘（第一版就忘了，欄位一直是空的）。
     P(0, L"EDIT", s.outputDir.c_str(), WS_BORDER | ES_AUTOHSCROLL, 0, 20, 340, 24,
       IDC_DIR_EDIT);
-    P(0, L"BUTTON", L"瀏覽…", BS_PUSHBUTTON, 348, 20, 80, 24, IDC_DIR_BROWSE);
+    P(0, L"BUTTON", i18n::T(L"瀏覽…"), BS_PUSHBUTTON, 348, 20, 80, 24, IDC_DIR_BROWSE);
 
-    P(0, L"STATIC", L"編碼器", SS_LEFT, 0, 58, 100, 18, 0);
+    P(0, L"STATIC", i18n::T(L"編碼器"), SS_LEFT, 0, 58, 100, 18, 0);
     HWND cb = P(0, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL, 0, 78, 214, 200,
                 IDC_CODEC);
-    for (const wchar_t* it : kCodecItems) SendMessageW(cb, CB_ADDSTRING, 0, (LPARAM)it);
+    for (const wchar_t* it : kCodecItems)
+        SendMessageW(cb, CB_ADDSTRING, 0, (LPARAM)i18n::T(it));
     SendMessageW(cb, CB_SETCURSEL, (WPARAM)(s.codec < 4 ? s.codec : 0), 0);
 
-    P(0, L"STATIC", L"幀率", SS_LEFT, 232, 58, 100, 18, 0);
+    P(0, L"STATIC", i18n::T(L"幀率"), SS_LEFT, 232, 58, 100, 18, 0);
     HWND fb = P(0, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL, 232, 78, 196, 200,
                 IDC_FPS);
     for (int f : kFpsItems) {
-        wchar_t b[32];
+        // 不可以用固定緩衝區：中文「144 fps（高刷螢幕）」只有 15 個字，但
+        // 西班牙文是「144 fps (pantalla de alta frecuencia)」—— 塞進
+        // wchar_t[32] 會讓 swprintf_s 叫 invalid parameter handler，行程直接
+        // 以 0xC0000409 結束（＝換成西班牙文之後設定視窗一開就閃退）。
+        std::wstring label;
         // 高刷選項直接標在字串上，不另外擠一行說明 —— 對話框沒有多餘的垂直空間，
         // 而且選單展開時就是最需要看到這句話的時候。
         if (f >= 144)
-            swprintf_s(b, L"%d fps（高刷螢幕）", f);
+            label = i18n::Fmt(i18n::T(L"%d fps（高刷螢幕）"), f);
         else
-            swprintf_s(b, L"%d fps", f);
-        SendMessageW(fb, CB_ADDSTRING, 0, (LPARAM)b);
+            label = i18n::Fmt(L"%d fps", f);
+        SendMessageW(fb, CB_ADDSTRING, 0, (LPARAM)label.c_str());
     }
     int fsel = kFpsDefaultSel;
     for (int i = 0; i < kFpsCount; ++i) if (kFpsItems[i] == s.fps) fsel = i;
     SendMessageW(fb, CB_SETCURSEL, (WPARAM)fsel, 0);
 
-    P(0, L"STATIC", L"品質", SS_LEFT, 0, 118, 60, 18, 0);
+    // 標籤給 90px：中文「品質」只有 30px，但俄文「Качество」要 75px，
+    // 60px 會壓到右邊那個數值（看起來像「Качество70」）。數值跟著往右讓。
+    P(0, L"STATIC", i18n::T(L"品質"), SS_LEFT, 0, 118, 90, 18, 0);
     wchar_t qv[16];
     swprintf_s(qv, L"%d", s.quality);
-    P(0, L"STATIC", qv, SS_LEFT, 48, 118, 60, 18, IDC_QUALITY_VAL);
+    P(0, L"STATIC", qv, SS_LEFT, 94, 118, 60, 18, IDC_QUALITY_VAL);
 
     HWND tb = P(0, L"msctls_trackbar32", L"", TBS_HORZ | TBS_AUTOTICKS, 0, 138, 428, 32,
                 IDC_QUALITY);
@@ -485,9 +507,12 @@ void BuildControls(HWND h, const Settings& s) {
     SendMessageW(tb, TBM_SETTICFREQ, 10, 0);
     SendMessageW(tb, TBM_SETPOS, TRUE, s.quality);
 
-    P(0, L"BUTTON", L"系統聲音", BS_AUTOCHECKBOX, 0, 184, 110, 22, IDC_AUDIO_SYS);
-    P(0, L"BUTTON", L"麥克風", BS_AUTOCHECKBOX, 120, 184, 90, 22, IDC_AUDIO_MIC);
-    P(0, L"BUTTON", L"錄下游標", BS_AUTOCHECKBOX, 220, 184, 110, 22, IDC_CURSOR);
+    // 三顆勾選框的寬度是照「最長的翻譯」給的，不是照中文：德文的
+    // 「Mauszeiger aufnehmen」在 110px 會被切成「aufneh」。中文看起來還留
+    // 一堆空白，那是對的 —— 這裡的留白是給其他語言用的。
+    P(0, L"BUTTON", i18n::T(L"系統聲音"), BS_AUTOCHECKBOX, 0, 184, 122, 22, IDC_AUDIO_SYS);
+    P(0, L"BUTTON", i18n::T(L"麥克風"), BS_AUTOCHECKBOX, 126, 184, 100, 22, IDC_AUDIO_MIC);
+    P(0, L"BUTTON", i18n::T(L"錄下游標"), BS_AUTOCHECKBOX, 230, 184, 206, 22, IDC_CURSOR);
     CheckDlgButton(h, IDC_AUDIO_SYS, s.audioSystem ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(h, IDC_AUDIO_MIC, s.audioMic ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(h, IDC_CURSOR, s.captureCursor ? BST_CHECKED : BST_UNCHECKED);
@@ -495,9 +520,30 @@ void BuildControls(HWND h, const Settings& s) {
     // 分軌是給剪輯用的：檔案裡除了混音軌之外，每個音源再各留一條（標成
     // 「不要預設播」，所以一般播放器仍然只播混音軌）。預設關 —— 開了檔案
     // 會大一截，而且多數人只是錄完直接播。
-    P(0, L"BUTTON", L"保留分軌音源（給剪輯用，檔案較大）", BS_AUTOCHECKBOX, 0, 210, 420,
+    P(0, L"BUTTON", i18n::T(L"保留分軌音源（給剪輯用，檔案較大）"), BS_AUTOCHECKBOX, 0, 210, 420,
       22, IDC_AUDIO_SEP);
     CheckDlgButton(h, IDC_AUDIO_SEP, s.separateTracks ? BST_CHECKED : BST_UNCHECKED);
+
+    // ---- 介面語言 ----
+    //
+    // 放在「一般」頁最下面：它不是錄影參數，但也不是 OCR／熱鍵，而使用者
+    // 找「語言」時第一個會翻的就是「一般」。清單順序＝i18n 的語言表
+    // （比照 NetRedirector），名稱用各語言自己的寫法 —— 現在顯示的是什麼
+    // 語言都不影響他找到自己的那一行。
+    //
+    // 換語言**當場生效**（重建整個頁面，見 DlgProc 的 WM_APP_RELANG）：
+    // 如果只寫進 ini、下次啟動才生效，使用者會以為沒切成功。
+    // 標籤給 76px：越南文「Ngôn ngữ」是當中最長的（約 60px），原本的 60px
+    // 剛好貼齊下拉選單，看起來像被切掉。下拉選單的右緣維持不變。
+    P(0, L"STATIC", i18n::T(L"介面語言"), SS_LEFT, 0, 244, 76, 18, 0);
+    HWND lb = P(0, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 80,
+                240, 198, 280, IDC_LANG);
+    for (int i = 0; i < i18n::LanguageCount(); ++i) {
+        SendMessageW(lb, CB_ADDSTRING, 0, (LPARAM)i18n::Languages()[i].name);
+    }
+    int lsel = i18n::IndexOf(s.lang.c_str());
+    if (lsel < 0) lsel = i18n::IndexOf(i18n::Current());
+    SendMessageW(lb, CB_SETCURSEL, (WPARAM)(lsel < 0 ? 0 : lsel), 0);
 
     // ========================================================================
     // 第二頁：OCR（截圖 / OCR 相關）
@@ -506,19 +552,22 @@ void BuildControls(HWND h, const Settings& s) {
     // 這一頁刻意很短：真正需要設定的東西只有「截圖要不要順便存檔」與「存到
     // 哪裡」。預設動作（截圖 or OCR）不放這裡，而是記住使用者上一次在工具列上
     // 選了什麼 —— 那才是使用者調這個值的地方，進來一次就懂了。
-    P(1, L"STATIC", L"截圖 / OCR（熱鍵進入後，上方工具列可切換）", SS_LEFT, 0, 0, 430,
-      18, 0);
-    P(1, L"BUTTON", L"截圖時也存一份（檔案總管可直接貼上）", BS_AUTOCHECKBOX, 0, 24, 420,
-      22, IDC_SNIP_SAVE);
+    // 高度 32 = 兩行。這行在中文只有一行，但德文／俄文／泰文都超過 430px
+    // 會折成兩行；只給 18px 的話第二行會被切掉，而且 STATIC 不會有任何回報。
+    P(1, L"STATIC", i18n::T(L"截圖 / OCR（熱鍵進入後，上方工具列可切換）"), SS_LEFT, 0, 0,
+      436, 30, 0);
+    P(1, L"BUTTON", i18n::T(L"截圖時也存一份（檔案總管可直接貼上）"), BS_AUTOCHECKBOX, 0, 36,
+      436, 22, IDC_SNIP_SAVE);
     CheckDlgButton(h, IDC_SNIP_SAVE, s.snipSaveFile ? BST_CHECKED : BST_UNCHECKED);
 
     // 圖片專用資料夾。留空 = 輸出資料夾底下的 Snip\（見 Settings::SnipDir）。
     // 之所以獨立一欄而不是「跟影片放一起」：截圖通常只是過渡產物，分開之後
     // 整個資料夾可以一次清掉，不會連影片一起誤刪。
-    P(1, L"STATIC", L"圖片資料夾（留空 = 輸出資料夾\\Snip）", SS_LEFT, 0, 54, 400, 18, 0);
-    P(1, L"EDIT", s.snipDir.c_str(), WS_BORDER | ES_AUTOHSCROLL, 0, 74, 340, 24,
+    P(1, L"STATIC", i18n::T(L"圖片資料夾（留空 = 輸出資料夾\\Snip）"), SS_LEFT, 0, 62, 436,
+      18, 0);
+    P(1, L"EDIT", s.snipDir.c_str(), WS_BORDER | ES_AUTOHSCROLL, 0, 80, 340, 24,
       IDC_SNIP_DIR);
-    P(1, L"BUTTON", L"瀏覽…", BS_PUSHBUTTON, 348, 74, 80, 24, IDC_SNIP_DIR_BROWSE);
+    P(1, L"BUTTON", i18n::T(L"瀏覽…"), BS_PUSHBUTTON, 348, 80, 80, 24, IDC_SNIP_DIR_BROWSE);
 
     // ---- PrtScn 接管 ----
     //
@@ -532,16 +581,16 @@ void BuildControls(HWND h, const Settings& s) {
     // RegisterHotKey 回成功但收不到 WM_HOTKEY；設成 0 才收得到。
     // 所以「接管」這件事必然包含改系統設定，那就必須是一個看得見的開關。
     const bool taken = app::PrtScnOwned();
-    P(1, L"BUTTON", L"用 PrtScn 取代 Windows 剪取工具（截圖 / OCR）",
-      BS_AUTOCHECKBOX | WS_TABSTOP, 0, 112, 430, 20, IDC_PRTSN_TAKE);
+    P(1, L"BUTTON", i18n::T(L"用 PrtScn 取代 Windows 剪取工具（截圖 / OCR）"),
+      BS_AUTOCHECKBOX | WS_TABSTOP, 0, 112, 436, 20, IDC_PRTSN_TAKE);
     if (g_dlg->wantPrtsc) {
         CheckDlgButton(h, IDC_PRTSN_TAKE, BST_CHECKED);
     }
     P(1, L"STATIC",
-      taken ? L"目前由 CapWGC 接管。取消勾選會還原 Windows 的 PrtScn。"
-            : L"預設開啟。會關閉 Windows 11 的「使用 PrtScn 開啟剪取工具」"
-              L"（Win+Shift+S 不受影響），並把 PrtScn 綁給截圖 / OCR。",
-      SS_LEFT, 16, 132, 414, 34, IDC_PRTSN_NOTE);
+      taken ? i18n::T(L"目前由 CapWGC 接管。取消勾選會還原 Windows 的 PrtScn。")
+            : i18n::T(L"預設開啟。會關閉 Windows 11 的「使用 PrtScn 開啟剪取工具」"
+                      L"（Win+Shift+S 不受影響），並把 PrtScn 綁給截圖 / OCR。"),
+      SS_LEFT, 0, 132, 436, 50, IDC_PRTSN_NOTE);
 
     // OCR 引擎本身沒有可調的東西（模型固定在 exe 旁邊的 models\），所以這一頁
     // 只說明「它在那裡、壞了看哪裡」。留白比多一個不能用的欄位好。
@@ -551,10 +600,10 @@ void BuildControls(HWND h, const Settings& s) {
     // 會把最後一行切成一半 —— 而且 STATIC 不會回報「字被切掉」，看起來就像
     // 排版壞了。要嘛加高、要嘛把那行縮短，這裡兩件都做（見下面那句）。
     P(1, L"STATIC",
-      L"OCR 引擎：模型固定放在程式旁邊的 models\\，不需要設定。\r\n"
-      L"工具列的「OCR」是灰色＝引擎沒載入（原因見托盤提示，只提示一次）。\r\n"
-      L"辨識結果直接進剪貼簿，不開面板、不落地成檔案。",
-      SS_LEFT, 0, 176, 444, 74, 0);
+      i18n::T(L"OCR 引擎：模型固定放在程式旁邊的 models\\，不需要設定。\r\n"
+              L"工具列的「OCR」是灰色＝引擎沒載入（原因見托盤提示，只提示一次）。\r\n"
+              L"辨識結果直接進剪貼簿，不開面板、不落地成檔案。"),
+      SS_LEFT, 0, 186, 444, 96, 0);
 
     // ========================================================================
     // 第三頁：熱鍵
@@ -565,7 +614,7 @@ void BuildControls(HWND h, const Settings& s) {
     // exe 旁邊的 models\，這個欄位對他們只有兩個效果 —— 看起來像在選版本
     // （其實不是，換版本是換檔案、不是改路徑），以及手動改壞之後 OCR 默默
     // 失效。真的需要換模型目錄的情境太罕見，不值得占用設定畫面的版面。
-    P(2, L"STATIC", L"熱鍵（點欄位後直接按組合鍵）", SS_LEFT, 0, 0, 300, 18, 0);
+    P(2, L"STATIC", i18n::T(L"熱鍵（點欄位後直接按組合鍵）"), SS_LEFT, 0, 0, 300, 18, 0);
     // 顯示順序和 hk[] / kHotkeyIds[] 的索引是**兩件事**，別混在一起。
     // 最常用的排最上面（「視窗清單」連托盤單擊都會走，改動頻率最高）。
     // kHkOrder 存的是「原始索引」：HotkeyProc 的 dwRefData 拿到的也是原始索引，
@@ -577,9 +626,11 @@ void BuildControls(HWND h, const Settings& s) {
     for (int row = 0; row < kHotkeyCount; ++row) {
         const int i = kHkOrder[row];
         const int y = 24 + row * 28;
-        P(2, L"STATIC", kHkLabels[row], SS_LEFT, 0, y + 3, 140, 18, 0);
+        // 標籤 196px / 欄位 140px：中文標籤只要 90px，但「Bereich aufnehmen /
+        // Bereich aufziehen」這種譯文要 200px 上下。留白是給其他語言的。
+        P(2, L"STATIC", i18n::T(kHkLabels[row]), SS_LEFT, 0, y + 3, 196, 18, 0);
         HWND e = P(2, L"EDIT", HotkeyText(g_dlg->hk[i]).c_str(),
-                   WS_BORDER | ES_READONLY | ES_CENTER | WS_TABSTOP, 148, y, 180, 24,
+                   WS_BORDER | ES_READONLY | ES_CENTER | WS_TABSTOP, 200, y, 140, 24,
                    kHotkeyIds[i]);
         if (e) SetWindowSubclass(e, HotkeyProc, (UINT_PTR)kHotkeyIds[i], (DWORD_PTR)i);
     }
@@ -588,17 +639,19 @@ void BuildControls(HWND h, const Settings& s) {
     // 先吃掉（連帶彈出開始功能表），應用層只收得到「Shift+Win」這種半截組合，
     // 後面那個真正的鍵永遠不會到 —— 實測 Win+Shift+P 停在 Shift+Win+…。
     P(2, L"STATIC",
-      L"Esc 或 Backspace 清除（＝不綁熱鍵）。除了 PrtScn，至少需要一個修飾鍵；"
-      L"建議用 Ctrl / Alt / Shift，Win 組合會被系統先接走。\r\n"
-      L"被其他程式佔用的組合，會在按確定後提示。",
-      SS_LEFT, 0, 172, 430, 54, IDC_HINT);
-    P(2, L"STATIC", L"", SS_LEFT, 0, 232, 430, 18, IDC_HK_ERROR);
+      i18n::T(L"Esc 或 Backspace 清除（＝不綁熱鍵）。除了 PrtScn，至少需要一個修飾鍵；"
+              L"建議用 Ctrl / Alt / Shift，Win 組合會被系統先接走。\r\n"
+              L"被其他程式佔用的組合，會在按確定後提示。"),
+      SS_LEFT, 0, 172, 430, 78, IDC_HINT);
+    P(2, L"STATIC", L"", SS_LEFT, 0, 254, 430, 18, IDC_HK_ERROR);
 
     // ---- 共用按鈕 ----
     // 放在分頁外面：三頁共用同一組確定／取消，切頁時按鈕不會跳位置。
     g_curPage = -1;
-    Child(h, L"BUTTON", L"確定", BS_DEFPUSHBUTTON, 288, kTabY + kTabH + 12, 84, 28, IDOK);
-    Child(h, L"BUTTON", L"取消", BS_PUSHBUTTON, 380, kTabY + kTabH + 12, 84, 28, IDCANCEL);
+    Child(h, L"BUTTON", i18n::T(L"確定"), BS_DEFPUSHBUTTON, 288, kTabY + kTabH + 12, 84,
+          28, IDOK);
+    Child(h, L"BUTTON", i18n::T(L"取消"), BS_PUSHBUTTON, 380, kTabY + kTabH + 12, 84, 28,
+          IDCANCEL);
 
     ShowPage(h, 0);
 }
@@ -655,7 +708,7 @@ DWORD WINAPI BrowseThreadProc(void* p) {
 
     BROWSEINFOW bi{};
     bi.hwndOwner = j->owner;
-    bi.lpszTitle = L"選擇錄影輸出資料夾";
+    bi.lpszTitle = i18n::T(L"選擇錄影輸出資料夾");
     bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
     LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
     if (pidl) {
@@ -706,6 +759,41 @@ void BrowseFolder(HWND h, int editId) {
     }
 }
 
+// 換語言＝把控制項全部重建。
+//
+// 沒有更省的做法：這些文字是 CreateWindowExW 的參數，不是資源字串，改了
+// 語言只能重新建立。**先 ReadBack** 再重建，否則使用者剛打的資料夾、剛錄的
+// 熱鍵會在重建時被舊值蓋掉 —— 這是「切語言」看起來像「設定被清空」的原因。
+//
+// 重建的範圍是「這一頁的全部子視窗」而不是只改文字：控制項寬度是按字串長度
+// 排的（例如分頁籤、熱鍵標籤），只換文字會出現德文被切一半的情況。
+void RebuildForLanguage(HWND h) {
+    if (!g_dlg) return;
+    const int page = g_dlg->curPage;
+
+    ReadBack(h, g_dlg->s);
+
+    if (g_dlg->font) {
+        DeleteObject(g_dlg->font);
+        g_dlg->font = nullptr;
+    }
+    for (auto& v : g_dlg->page) v.clear();
+    g_dlg->tab = nullptr;
+    // EnumChildWindows 而不是逐一 DestroyWindow(page[i])：確定／取消兩顆
+    // 按鈕建立時 g_curPage 是 -1，不在 page[] 裡，只砍 page[] 會留下兩顆
+    // 舊語言的按鈕疊在新按鈕上面。
+    EnumChildWindows(
+        h, [](HWND c, LPARAM) -> BOOL { DestroyWindow(c); return TRUE; }, 0);
+
+    BuildControls(h, *g_dlg->s);
+    // 標題列也要換：它是 CreateWindowExW 給的，不會跟著控制項重建。
+    SetWindowTextW(h, i18n::T(L"CapWGC 設定"));
+    if (!g_dlg->hkError.empty()) {
+        if (HWND e = GetDlgItem(h, IDC_HK_ERROR)) SetWindowTextW(e, g_dlg->hkError.c_str());
+    }
+    ShowPage(h, page < 0 ? 0 : page);
+}
+
 LRESULT CALLBACK DlgProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     switch (m) {
     case WM_CREATE:
@@ -751,7 +839,7 @@ LRESULT CALLBACK DlgProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             // 之後」才失敗，使用者會覺得設定沒生效。在這裡先擋。
             std::wstring dup;
             if (g_dlg->s->hotkeys.Duplicate(&dup)) {
-                ShowHotkeyError(h, dup + L"綁了同一組熱鍵");
+                ShowHotkeyError(h, dup + i18n::T(L"綁了同一組熱鍵"));
                 return 0;
             }
             g_dlg->ok = true;
@@ -781,19 +869,35 @@ LRESULT CALLBACK DlgProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             HWND note = GetDlgItem(h, IDC_PRTSN_NOTE);
             if (note) {
                 SetWindowTextW(note,
-                               on ? L"確定後會關閉 Windows 11 的「使用 PrtScn 開啟剪取工具」"
-                                    L"（Win+Shift+S 不受影響），並把 PrtScn 綁給截圖 / OCR。"
-                                  : L"取消勾選會把 PrtScn 還原給 Windows（原本沒設定過就"
-                                    L"維持沒設定），截圖熱鍵回到 Ctrl+Alt+X。");
+                               on ? i18n::T(L"確定後會關閉 Windows 11 的「使用 PrtScn 開啟剪取工具」"
+                                            L"（Win+Shift+S 不受影響），並把 PrtScn 綁給截圖 / OCR。")
+                                  : i18n::T(L"取消勾選會把 PrtScn 還原給 Windows（原本沒設定過就"
+                                            L"維持沒設定），截圖熱鍵回到 Ctrl+Alt+X。"));
             }
             return 0;
         }
+        case IDC_LANG:
+            // 換語言：先載入字串，再**延後**重建頁面。這裡只改記憶體裡的
+            // i18n 與 s->lang；真正寫進 ini 是按下確定之後的事（跟其他欄位
+            // 一樣，按取消不該留下副作用）。
+            if (HIWORD(w) == CBN_SELCHANGE) {
+                const int sel = ComboSel(h, IDC_LANG);
+                if (sel >= 0 && sel < i18n::LanguageCount()) {
+                    g_dlg->s->lang = i18n::Languages()[sel].code;
+                    i18n::Load(g_dlg->s->lang.c_str());
+                    PostMessageW(h, WM_APP_RELANG, 0, 0);
+                }
+            }
+            return 0;
         default:
             break;
         }
         return 0;
     case WM_CLOSE:
         DestroyWindow(h);
+        return 0;
+    case WM_APP_RELANG:
+        RebuildForLanguage(h);
         return 0;
     case WM_DESTROY:
         g_dlg->hwnd = nullptr;
@@ -836,7 +940,7 @@ bool HotkeyUsable(const Hotkey& hk) {
 }
 
 std::wstring HotkeyText(const Hotkey& hk) {
-    if (hk.vk == 0) return L"（未設定）";
+    if (hk.vk == 0) return i18n::T(L"（未設定）");
     std::wstring s;
     if (hk.mods & MOD_CONTROL) s += L"Ctrl+";
     if (hk.mods & MOD_ALT) s += L"Alt+";
@@ -924,14 +1028,20 @@ Hotkey SnipFallbackHotkey() { return Hotkey{MOD_CONTROL | MOD_ALT, 'X'}; }
 
 bool Hotkeys::Duplicate(std::wstring* which) const {
     const Hotkey all[5] = {region, picker, screen, stop, snip};
-    const wchar_t* names[5] = {L"選區域", L"視窗清單", L"錄主螢幕", L"停止",
-                               L"截圖 / OCR"};
+    const wchar_t* names[5] = {i18n::T(L"選區域"), i18n::T(L"視窗清單"),
+                               i18n::T(L"錄主螢幕"), i18n::T(L"停止"),
+                               i18n::T(L"截圖 / OCR")};
     for (int i = 0; i < 5; ++i) {
         if (!all[i].set()) continue;
         for (int j = i + 1; j < 5; ++j) {
             if (!all[j].set()) continue;
             if (all[i].same(all[j])) {
-                if (which) *which = std::wstring(L"「") + names[i] + L"」與「" + names[j] + L"」";
+                if (which) {
+                    // 整句放進語系檔（「A」與「B」），不要用「」+名字拼起來：
+                    // 引號與語序每種語言都不一樣。長度也不固定（熱鍵名可長可短），
+                    // 所以用 Fmt 而不是固定緩衝區。
+                    *which = i18n::Fmt(i18n::T(L"「%s」與「%s」"), names[i], names[j]);
+                }
                 return true;
             }
         }
@@ -1029,6 +1139,15 @@ void Settings::Load() {
     if (fps < 1 || fps > 240) fps = 60;
     if (gop < 1) gop = 2;
 
+    // 介面語言。ini 裡沒有這個鍵＝從來沒選過 → 空字串，啟動時用系統語言
+    // （i18n::LoadFromIni）。不寫死預設值，換到不同語系的機器上才會自動講
+    // 那個語言。
+    {
+        wchar_t b[32] = {};
+        GetPrivateProfileStringW(L"ui", L"lang", L"", b, 32, ini.c_str());
+        lang = b;
+    }
+
     // 控件位置：空字串 = 沒拖過。格式 "dx,dy"，手改得動也看得懂。
     wchar_t pos[64] = {};
     GetPrivateProfileStringW(L"ui", L"bar_pos", L"", pos, 64, ini.c_str());
@@ -1105,6 +1224,8 @@ void Settings::Save() const {
     WritePrivateProfileStringW(L"snip", L"dir", snipDir.empty() ? nullptr : snipDir.c_str(),
                                ini.c_str());
     WritePrivateProfileStringW(L"ocr", L"warned", ocrWarned ? L"1" : nullptr,
+                               ini.c_str());
+    WritePrivateProfileStringW(L"ui", L"lang", lang.empty() ? nullptr : lang.c_str(),
                                ini.c_str());
 
     if (hasBarPos) {
@@ -1281,6 +1402,8 @@ bool ShowSettingsDialog(HWND owner, Settings* s, bool* wantPrtsc) {
     wc.hInstance = GetModuleHandleW(nullptr);
     wc.hCursor = LoadCursorW(nullptr, (LPCWSTR)IDC_ARROW);
     wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+    wc.hIcon = ui::LoadAppIcon(GetSystemMetrics(SM_CXICON));
+    wc.hIconSm = ui::LoadAppIcon(GetSystemMetrics(SM_CXSMICON));
     wc.lpszClassName = L"CapWGCSettings";
     RegisterClassExW(&wc);
 
@@ -1289,10 +1412,13 @@ bool ShowSettingsDialog(HWND owner, Settings* s, bool* wantPrtsc) {
     g_dlg = &st;
 
     const DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE;
-    // 客戶區大小：分頁籤 12,12 起、452×300，按鈕在 y=324 高 28（→352），
-    // 下緣留 12。改成三分頁之後高度從 720 掉到 364 —— 這是分頁唯一的實際好處：
+    // 客戶區大小：分頁籤 12,12 起、452×320，按鈕在 y=344 高 28（→372），
+    // 下緣留 12。改成三分頁之後高度從 720 掉到 384 —— 這是分頁唯一的實際好處：
     // 使用者不必再把視窗拖高才看得到下面的欄位。
-    RECT rc{0, 0, 476, 364};
+    //
+    // 高度 384 不是隨手寫的：kTabH 改大／改小都要一起改這裡，不然按鈕會被
+    // 視窗下緣切掉（不會有任何錯誤訊息，只會看到半顆按鈕）。
+    RECT rc{0, 0, 476, 384};
     AdjustWindowRectEx(&rc, style, FALSE, WS_EX_CONTROLPARENT);
     const int w = rc.right - rc.left;
     const int h = rc.bottom - rc.top;
@@ -1346,8 +1472,8 @@ bool ShowSettingsDialog(HWND owner, Settings* s, bool* wantPrtsc) {
     if (y < work.top) y = work.top;   // 標題列一定要在工作區內，否則拖不動
 
     HWND hwnd = CreateWindowExW(WS_EX_CONTROLPARENT | WS_EX_TOPMOST, L"CapWGCSettings",
-                                L"CapWGC 設定", style, x, y, w, h, nullptr, nullptr,
-                                GetModuleHandleW(nullptr), nullptr);
+                                i18n::T(L"CapWGC 設定"), style, x, y, w, h, nullptr,
+                                nullptr, GetModuleHandleW(nullptr), nullptr);
     if (!hwnd) {
         g_dlg = nullptr;
         return false;

@@ -129,6 +129,13 @@ struct Settings {
 
     Hotkeys hotkeys = Hotkeys::Default();
 
+    // ---- 介面語言 ----
+    //
+    // 空字串 = 還沒選過，啟動時用系統語言（見 i18n::Detect）。第一次存檔
+    // 之後 ini 就會有明確的值 —— 使用者換了系統語言但不換這個欄位時，
+    // 介面不該跟著跳。
+    std::wstring lang;
+
     static std::wstring DefaultOutputDir();
 
     // 截圖 PNG 的落地目錄。snipDir 有設就用它，否則 outputDir 底下的 Snip\。

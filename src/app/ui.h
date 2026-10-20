@@ -4,8 +4,10 @@
 //
 // 這裡刻意只放「錄屏軟體一定會用到、而且很容易寫錯」的四個東西：
 //
-//   MakeDotIcon   托盤圖示。執行期畫，不用 .ico 資源 —— 這樣 build.bat 不必
-//                 多接一個 rc.exe，圖示也能隨狀態換色（錄製中變紅）。
+//   LoadTrayIcon  托盤圖示。閒置 = 應用程式圖示；錄製中 = 同一個圖示加紅點
+//                 徽章（build\app_rec.ico）。兩個都來自 PE 資源 —— 早期版本
+//                 是執行期畫紅點，結果是托盤上只看得到紅點、看不到這是哪個
+//                 程式，使用者根本找不到它。
 //   DimPanel      半透明遮罩。用 WS_EX_LAYERED + LWA_ALPHA 做「整片均勻變暗」，
 //                 不用 per-pixel alpha —— 均勻變暗本來就不需要。
 //   BorderWindow  中空外框。用 SetWindowRgn 挖掉中間，所以只有框那幾 px 屬於
@@ -52,9 +54,19 @@ void SetCaptureExclusion(bool enabled);
 // 畫面裡，只能靠 WDA_EXCLUDEFROMCAPTURE 把自己拿掉。
 void ApplyCaptureExclusion(HWND h);
 
-// ---- 托盤圖示 ----
-// recording = true 畫紅底白方塊（停止），false 畫深底紅點（可錄）。
-HICON MakeDotIcon(bool recording, int size = 16);
+// ---- 托盤圖示（資源） ----
+// recording = true 回傳「應用程式圖示 + 紅點徽章」，false 回傳應用程式圖示。
+// 徽章是 build 時烤進 build\app_rec.ico 的，不是執行期疊上去的：DrawIconEx
+// 畫進 DIB 不保證搬得動 alpha，某些機器上會得到半透明的托盤圖示。
+HICON LoadTrayIcon(bool recording, int size = 16);
+
+// ---- 應用程式圖示（資源） ----
+//
+// exe 在檔案總管裡的圖示、設定／選擇視窗在工作列上的圖示，只能來自 PE 資源
+// （build\app.rc → build\app.ico）。size 建議給 GetSystemMetrics(SM_CXICON)
+// 或 SM_CXSMICON：自己指定大小比讓 shell 從 256px 縮下來清楚。
+// 資源不見了（例如有人只拿走 exe）就退回系統預設圖示，不會回傳 null。
+HICON LoadAppIcon(int size);
 
 // ---- 半透明遮罩 ----
 class DimPanel {

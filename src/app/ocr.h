@@ -50,7 +50,16 @@ public:
     // 辨識完成時被呼叫（在 UI 執行緒）。
     using DoneFn = std::function<void(const OcrResult&)>;
     // 引擎就緒 / 起不來時被呼叫（在 UI 執行緒）。ready=false 時 detail 有原因。
-    using ReadyFn = std::function<void(bool ready, const std::wstring& detail)>;
+    //
+    // detail 是**繁體中文原文**，不是翻譯過的句子：呼叫端要用它分類失敗原因
+    // （find("models 目錄不完整") 之類），翻過的句子不含原文片段就分不出來。
+    // 要顯示時才過 i18n。
+    //
+    // param 是句子裡的那個值（版本字串、錯誤訊息），由呼叫端代入 —— 不要把值
+    // 直接併進 detail：detail 一旦帶著值就永遠查不到語系檔的 key（key 裡是 %s），
+    // 使用者會看到中文。
+    using ReadyFn =
+        std::function<void(bool ready, const std::wstring& detail, const std::wstring& param)>;
 
     ~OcrEngine();
 
@@ -82,7 +91,13 @@ public:
 private:
     void WorkerMain();
     void PostDone(const OcrResult& r);
-    void PostReady(bool ready, const std::wstring& detail);
+    // 跨執行緒的訊息只能塞一個指標，所以兩個字串包成一個小結構丟過去。
+    struct ReadyNote {
+        std::wstring detail;
+        std::wstring param;
+    };
+    void PostReady(bool ready, const std::wstring& detail,
+                   const std::wstring& param = std::wstring());
 
     struct Job {
         int id = 0;

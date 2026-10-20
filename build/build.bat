@@ -135,9 +135,16 @@ set "PATH=!MSVC!\bin\Hostx64\x64;!PATH!"
 set "INCLUDE=!MSVC!\include;!KIT!\Include\!SDK!\ucrt;!KIT!\Include\!SDK!\shared;!KIT!\Include\!SDK!\um;!KIT!\Include\!SDK!\winrt;!KIT!\Include\!SDK!\cppwinrt"
 set "LIB=!MSVC!\lib\x64;!KIT!\Lib\!SDK!\ucrt\x64;!KIT!\Lib\!SDK!\um\x64"
 where cl >nul 2>nul || (echo [build] FAILED: cl still not found & exit /b 1)
+rem rc.exe is not next to cl - it lives in the SDK's bin directory, which the
+rem hand-built PATH above does not include. vcvars would have put it there.
+set "RC=!KIT!\bin\!SDK!\x64\rc.exe"
 
 :toolset_ready
 echo [build] toolset ready
+
+rem Same story as cl: in a developer shell rc.exe is already on PATH, otherwise
+rem use the SDK copy found above. Kept out of the block so both paths agree.
+if not defined RC set "RC=rc.exe"
 
 set "TARGET=%~1"
 if "%TARGET%"=="" set "TARGET=all"
@@ -286,17 +293,29 @@ echo [build] CapWGC.exe
 rem GUI. Same core objects as CapCli plus src\app\*. The app layer must not
 rem duplicate the recording loop -- that is why recorder.cpp exists.
 if exist "%OUT%\CapWGC.exe" del /f /q "%OUT%\CapWGC.exe" >nul 2>nul
+
+rem The exe/window icon is the only resource in the project (build\app.rc).
+rem rc runs from build\ so the .rc can name app.ico relatively.
+echo [build] app.res
+if exist "%OUT%\app.res" del /f /q "%OUT%\app.res" >nul 2>nul
+pushd "%ROOT%\build"
+"%RC%" /nologo /fo "%OUT%\app.res" app.rc
+if errorlevel 1 (popd & echo [build] FAILED: rc app.rc & exit /b 1)
+popd
+
 cl %CFLAGS% /I"%ROOT%\third_party\onnxruntime\include" ^
    "%ROOT%\src\app\main.cpp" "%ROOT%\src\app\ui.cpp" ^
    "%ROOT%\src\app\overlay.cpp" "%ROOT%\src\app\picker.cpp" ^
    "%ROOT%\src\app\controlbar.cpp" ^
    "%ROOT%\src\app\settings.cpp" ^
+   "%ROOT%\src\app\i18n.cpp" ^
    "%ROOT%\src\app\snip.cpp" "%ROOT%\src\app\ocr.cpp" ^
    "%ROOT%\src\core\ocr_onnx.cpp" ^
    "%ROOT%\src\core\recorder.cpp" "%ROOT%\src\core\capture_wgc.cpp" ^
    "%ROOT%\src\core\encoder_mft.cpp" "%ROOT%\src\core\codec_select.cpp" ^
    "%ROOT%\src\core\mft_encoder.cpp" "%ROOT%\src\core\mp4_muxer.cpp" ^
    "%ROOT%\src\core\audio_capture.cpp" "%ROOT%\src\core\aac_encoder.cpp" ^
+   "%OUT%\app.res" ^
    /Fo"%OUT%\\" /Fe"%OUT%\CapWGC.exe" ^
    /link %LTCG% /SUBSYSTEM:WINDOWS mfplat.lib mfuuid.lib mfreadwrite.lib ole32.lib ^
    oleaut32.lib d3d11.lib dxgi.lib user32.lib shcore.lib windowsapp.lib dwmapi.lib ^
@@ -312,6 +331,13 @@ rem the loader kills the process before main(), and on Windows 11 it would even
 rem find System32\onnxruntime.dll (an older, API-incompatible build) instead.
 copy /y "%ROOT%\third_party\onnxruntime\lib\onnxruntime.dll" "%OUT%" >nul
 if errorlevel 1 (echo [build] FAILED: copy onnxruntime.dll & exit /b 1)
+
+rem Interface languages. src\app\i18n.cpp looks for locale\<code>.json next to
+rem the exe; without the folder every string falls back to the source (zh_TW),
+rem which is a working UI but not the one the user picked in the settings.
+if not exist "%OUT%\locale" mkdir "%OUT%\locale"
+copy /y "%ROOT%\locale\*.json" "%OUT%\locale" >nul
+if errorlevel 1 (echo [build] FAILED: copy locale & exit /b 1)
 
 :verify
 rem Language-level assertions on the built exe. This is a separate target so CI

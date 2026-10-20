@@ -4,6 +4,8 @@
 
 #include "ui.h"
 
+#include "i18n.h"
+
 #include <windowsx.h>
 
 #include <algorithm>
@@ -64,10 +66,6 @@ void LogHr(const char* what, HRESULT hr) {
     fclose(f);
 }
 
-inline BYTE Clamp8(float v) {
-    return (BYTE)(v < 0 ? 0 : (v > 255 ? 255 : v));
-}
-
 } // namespace
 
 void SetCaptureExclusion(bool enabled) { g_captureExclusion = enabled; }
@@ -80,79 +78,30 @@ void ApplyCaptureExclusion(HWND h) {
 // 圖示
 // ============================================================================
 
-HICON MakeDotIcon(bool recording, int size) {
-    if (size <= 0) size = 16;
+// build\app.rc 裡的名字（IDI_APPICON / IDI_APPREC）。寫在這裡而不是共用標頭：
+// rc 與 C++ 沒有共用的常數檔，兩邊各自寫一個 101/102 比多拉一個 .h 進來單純。
+constexpr int kAppIconId = 101;
+constexpr int kRecIconId = 102;
 
-    BITMAPV5HEADER bi{};
-    bi.bV5Size = sizeof(bi);
-    bi.bV5Width = size;
-    bi.bV5Height = -size;              // 負 = top-down
-    bi.bV5Planes = 1;
-    bi.bV5BitCount = 32;
-    bi.bV5Compression = BI_BITFIELDS;
-    bi.bV5RedMask = 0x00FF0000;
-    bi.bV5GreenMask = 0x0000FF00;
-    bi.bV5BlueMask = 0x000000FF;
-    bi.bV5AlphaMask = 0xFF000000;
+HICON LoadAppIcon(int size) {
+    if (size <= 0) size = GetSystemMetrics(SM_CXICON);
+    // LoadImageW 指定大小：讓 Windows 直接挑最接近的那一格，而不是把 256px
+    // 那張硬縮到 16px（縮出來會糊成一團）。
+    HICON h = (HICON)LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(kAppIconId),
+                                IMAGE_ICON, size, size, LR_DEFAULTCOLOR);
+    // 資源不在（例如有人只複製了 exe 之外的東西）也要有圖示，不然視窗左上角
+    // 會是空白 —— 那看起來像程式壞了。
+    return h ? h : LoadIconW(nullptr, IDI_APPLICATION);
+}
 
-    void* bits = nullptr;
-    HDC screen = GetDC(nullptr);
-    HBITMAP color = CreateDIBSection(screen, reinterpret_cast<BITMAPINFO*>(&bi),
-                                     DIB_RGB_COLORS, &bits, nullptr, 0);
-    ReleaseDC(nullptr, screen);
-    if (!color || !bits) return nullptr;
-
-    // 閒置 = 空心紅環（錄影機的紅點，淺色與深色工作列上都看得見）
-    // 錄製中 = 實心紅圓 + 白方塊（停止）
-    const float c = size * 0.5f;
-    const float rOuter = size * 0.46f;
-    const float rInner = size * 0.28f;
-    const float half = size * 0.155f;
-
-    auto* px = static_cast<uint32_t*>(bits);
-    for (int y = 0; y < size; ++y) {
-        for (int x = 0; x < size; ++x) {
-            const float dx = (float)x + 0.5f - c;
-            const float dy = (float)y + 0.5f - c;
-            const float d = std::sqrt(dx * dx + dy * dy);
-
-            // 抗鋸齒：距離邊界 1px 內做線性過渡
-            float a = std::min(1.0f, rOuter - d + 0.5f);
-            if (!recording) {
-                // 挖掉中間 → 空心環
-                a = std::min(a, std::max(0.0f, d - rInner + 0.5f));
-            }
-            if (a <= 0.0f) continue;
-
-            float r = 220, g = 58, b = 58;
-            if (recording && std::fabs(dx) < half && std::fabs(dy) < half) {
-                r = g = b = 255;   // 白方塊
-            }
-            // UpdateLayeredWindow 之外的圖示也要 premultiplied alpha
-            px[y * size + x] = ((uint32_t)Clamp8(a * 255.0f) << 24) |
-                               ((uint32_t)Clamp8(r * a) << 16) |
-                               ((uint32_t)Clamp8(g * a) << 8) |
-                               (uint32_t)Clamp8(b * a);
-        }
+HICON LoadTrayIcon(bool recording, int size) {
+    if (size <= 0) size = GetSystemMetrics(SM_CXSMICON);
+    if (recording) {
+        HICON h = (HICON)LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(kRecIconId),
+                                    IMAGE_ICON, size, size, LR_DEFAULTCOLOR);
+        if (h) return h;
     }
-
-    // 單色遮罩：全 0 = 由 alpha 通道決定透明度
-    HBITMAP mask = CreateBitmap(size, size, 1, 1, nullptr);
-    if (mask) {
-        const int stride = ((size + 15) / 16) * 2;
-        std::vector<BYTE> zeros((size_t)stride * size, 0);
-        SetBitmapBits(mask, (DWORD)zeros.size(), zeros.data());
-    }
-
-    ICONINFO ii{};
-    ii.fIcon = TRUE;
-    ii.hbmColor = color;
-    ii.hbmMask = mask;
-    HICON icon = CreateIconIndirect(&ii);
-
-    DeleteObject(color);
-    if (mask) DeleteObject(mask);
-    return icon;
+    return LoadAppIcon(size);
 }
 
 // ============================================================================
@@ -802,7 +751,7 @@ void Toolbar::Layout(const RECT& workArea) {
         }
         return (int)std::ceil(w);
     };
-    const int wSnip = padX + icon + gapIT + textW(L"截圖") + padX;
+    const int wSnip = padX + icon + gapIT + textW(app::i18n::T(L"截圖")) + padX;
     const int wOcr = padX + icon + gapIT + textW(L"OCR") + padX;
 
     w_ = pad * 2 + wSnip + wOcr;
@@ -938,7 +887,7 @@ void Toolbar::Paint() {
                           D2D1_DRAW_TEXT_OPTIONS_CLIP);
         }
     };
-    drawSeg(Action::Snip, L"截圖");
+    drawSeg(Action::Snip, app::i18n::T(L"截圖"));
     drawSeg(Action::Ocr, L"OCR");
 
     const HRESULT hr = rt_->EndDraw();

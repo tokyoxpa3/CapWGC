@@ -4,6 +4,8 @@
 
 #include "snip.h"
 
+#include "i18n.h"
+
 // DROPFILES（CF_HDROP 的內容格式）住在 shlobj_core.h，光靠 windows.h 拿不到。
 // 這個標頭是必要的，不是為了 Shell API —— 只是為了那個結構定義。
 #include <shlobj_core.h>
@@ -89,17 +91,17 @@ bool ScreenBitmap::CaptureVirtualScreen(std::wstring* err) {
     const int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
     const int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
     if (vw <= 0 || vh <= 0) {
-        if (err) *err = L"讀不到虛擬桌面大小";
+        if (err) *err = i18n::T(L"讀不到虛擬桌面大小");
         return false;
     }
     if (!Alloc(vw, vh)) {
-        if (err) *err = L"配置截圖記憶體失敗";
+        if (err) *err = i18n::T(L"配置截圖記憶體失敗");
         return false;
     }
 
     HDC screen = GetDC(nullptr);
     if (!screen) {
-        if (err) *err = L"取得桌面 DC 失敗";
+        if (err) *err = i18n::T(L"取得桌面 DC 失敗");
         Free();
         return false;
     }
@@ -109,7 +111,7 @@ bool ScreenBitmap::CaptureVirtualScreen(std::wstring* err) {
     ReleaseDC(nullptr, screen);
 
     if (!ok) {
-        if (err) *err = L"BitBlt 抓取桌面失敗";
+        if (err) *err = i18n::T(L"BitBlt 抓取桌面失敗");
         Free();
         return false;
     }
@@ -205,7 +207,7 @@ bool ScreenBitmap::SavePng(const std::wstring& path) const {
 bool CopyToClipboard(HWND owner, const ScreenBitmap& bmp,
                      const std::wstring& filePath, std::wstring* err) {
     if (!bmp.valid()) {
-        if (err) *err = L"沒有可複製的圖";
+        if (err) *err = i18n::T(L"沒有可複製的圖");
         return false;
     }
 
@@ -217,13 +219,13 @@ bool CopyToClipboard(HWND owner, const ScreenBitmap& bmp,
 
     HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, total);
     if (!mem) {
-        if (err) *err = L"配置剪貼簿記憶體失敗";
+        if (err) *err = i18n::T(L"配置剪貼簿記憶體失敗");
         return false;
     }
     auto* p = static_cast<BYTE*>(GlobalLock(mem));
     if (!p) {
         GlobalFree(mem);
-        if (err) *err = L"鎖定剪貼簿記憶體失敗";
+        if (err) *err = i18n::T(L"鎖定剪貼簿記憶體失敗");
         return false;
     }
 
@@ -251,7 +253,7 @@ bool CopyToClipboard(HWND owner, const ScreenBitmap& bmp,
 
     if (!OpenClipboard(owner)) {
         GlobalFree(mem);
-        if (err) *err = L"開啟剪貼簿失敗（可能有其他程式正在使用）";
+        if (err) *err = i18n::T(L"開啟剪貼簿失敗（可能有其他程式正在使用）");
         return false;
     }
     EmptyClipboard();
@@ -262,7 +264,7 @@ bool CopyToClipboard(HWND owner, const ScreenBitmap& bmp,
         // 系統接手，失敗時系統不管，忘了 Free 就是每次失敗漏一塊記憶體。
         GlobalFree(mem);
         CloseClipboard();
-        if (err) *err = L"寫入剪貼簿失敗";
+        if (err) *err = i18n::T(L"寫入剪貼簿失敗");
         return false;
     }
     mem = nullptr;   // 所有權已轉移

@@ -25,6 +25,7 @@
 // ============================================================================
 
 #include "controlbar.h"
+#include "i18n.h"
 #include "ocr.h"
 #include "overlay.h"
 #include "picker.h"
@@ -203,6 +204,17 @@ std::string U8(const std::wstring& s) {
     return out;
 }
 
+// 帶參數的介面字串。**整句**進語系檔（`"%s 選區域錄影"`），不要在程式裡把
+// 句子切成片段再拼起來：語序與格位每種語言都不一樣，拼出來的每種語言都怪。
+// 實作在 i18n（長度由字串決定，不用固定緩衝區 —— 見 i18n.h 的說明）。
+std::wstring WFmt(const wchar_t* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    std::wstring s = app::i18n::FmtV(fmt, ap);
+    va_end(ap);
+    return s;
+}
+
 // ---- A/V 偏移 -------------------------------------------------------------
 //
 // 這裡**刻意不讀** out/calibrate.sh 產生的校準檔。
@@ -234,11 +246,11 @@ struct HkSlot {
 };
 
 std::vector<HkSlot> Slots(const app::Hotkeys& k) {
-    return {{HOTKEY_REGION, L"選區域", k.region},
-            {HOTKEY_PICKER, L"視窗清單", k.picker},
-            {HOTKEY_SCREEN, L"錄主螢幕", k.screen},
-            {HOTKEY_STOP, L"停止", k.stop},
-            {HOTKEY_SNIP, L"截圖 / OCR", k.snip}};
+    return {{HOTKEY_REGION, app::i18n::T(L"選區域"), k.region},
+            {HOTKEY_PICKER, app::i18n::T(L"視窗清單"), k.picker},
+            {HOTKEY_SCREEN, app::i18n::T(L"錄主螢幕"), k.screen},
+            {HOTKEY_STOP, app::i18n::T(L"停止"), k.stop},
+            {HOTKEY_SNIP, app::i18n::T(L"截圖 / OCR"), k.snip}};
 }
 
 const int kHotkeyIds[5] = {HOTKEY_REGION, HOTKEY_PICKER, HOTKEY_SCREEN, HOTKEY_STOP,
@@ -283,23 +295,26 @@ void ReconcilePrtScn(App& a);
 // 沒有熱鍵時改講真正的入口（選擇視窗），它一定在。
 std::wstring StartHint(const App& a) {
     const app::Hotkeys& hk = a.settings.hotkeys;
-    if (hk.region.set()) return app::HotkeyText(hk.region) + L" 選區域錄影";
-    if (hk.picker.set()) return app::HotkeyText(hk.picker) + L" 選擇視窗";
-    return L"點兩下開啟";
+    if (hk.region.set())
+        return WFmt(app::i18n::T(L"%s 選區域錄影"), app::HotkeyText(hk.region).c_str());
+    if (hk.picker.set())
+        return WFmt(app::i18n::T(L"%s 選擇視窗"), app::HotkeyText(hk.picker).c_str());
+    return app::i18n::T(L"點兩下開啟");
 }
 
 std::wstring TrayText(const App& a, bool recording, int seconds = -1) {
     if (recording) {
-        std::wstring t = L"CapWGC — 錄影中";
+        std::wstring t = app::i18n::T(L"CapWGC — 錄影中");
         if (seconds >= 0) {
             wchar_t buf[32];
             swprintf_s(buf, L" %02d:%02d", seconds / 60, seconds % 60);
             t += buf;
         }
-        if (a.micMuted) t += L"（麥克風靜音）";
+        if (a.micMuted) t += app::i18n::T(L"（麥克風靜音）");
         // 沒綁熱鍵時不要印「（未設定） 停止」—— 控制項上的停止鈕就是入口。
         if (a.settings.hotkeys.stop.set())
-            t += L"　" + app::HotkeyText(a.settings.hotkeys.stop) + L" 停止";
+            t += L"　" + WFmt(app::i18n::T(L"%s 停止"),
+                              app::HotkeyText(a.settings.hotkeys.stop).c_str());
         return t;
     }
     return L"CapWGC — " + StartHint(a);
@@ -407,7 +422,7 @@ bool ApplyHotkeys(App& a, const app::Hotkeys& next, std::wstring* failed) {
 bool EngagePrtScn(App& a, std::wstring* why) {
     const app::PrtScnState st = app::PrtScnQuery();
     if (st == app::PrtScnState::Error) {
-        if (why) *why = L"讀不到系統設定（登錄檔的 Control Panel\\Keyboard）";
+        if (why) *why = app::i18n::T(L"讀不到系統設定（登錄檔的 Control Panel\\Keyboard）");
         return false;
     }
 
@@ -418,7 +433,7 @@ bool EngagePrtScn(App& a, std::wstring* why) {
     next.snip = app::Hotkey{0, VK_SNAPSHOT};
     std::wstring bad;
     if (!ApplyHotkeys(a, next, &bad)) {
-        if (why) *why = L"PrtScn 已被其他程式註冊";
+        if (why) *why = app::i18n::T(L"PrtScn 已被其他程式註冊");
         return false;
     }
 
@@ -430,7 +445,7 @@ bool EngagePrtScn(App& a, std::wstring* why) {
         // ApplyHotkeys 成功時已經把 members 換成 next 了，拿它去「還原」等於
         // 還原成同一個值，熱鍵就停在一個按了沒反應的 PrtScn 上（實測過）。
         ApplyHotkeys(a, prev, nullptr);
-        if (why) *why = L"沒有權限修改系統設定（可能被群組原則鎖住）";
+        if (why) *why = app::i18n::T(L"沒有權限修改系統設定（可能被群組原則鎖住）");
         return false;
     }
 
@@ -448,7 +463,7 @@ bool ReleasePrtScn(App& a, std::wstring* why) {
     bool ok = true;
     if (app::PrtScnOwned()) {
         ok = app::PrtScnGiveBack();
-        if (!ok && why) *why = L"還原系統設定失敗，PrScn 可能仍由 CapWGC 接管";
+        if (!ok && why) *why = app::i18n::T(L"還原系統設定失敗，PrScn 可能仍由 CapWGC 接管");
     }
 
     // 熱鍵退回 Ctrl+Alt+X（不是清空 —— 使用者還是要能截圖）。
@@ -635,7 +650,7 @@ void BeginRecording(App& a, const capwgc::RecorderConfig& cfg, const RECT& captu
         a.rec.reset();
         a.mode = Mode::Idle;
         a.lastError = err;
-        TrayBalloon(a, L"無法開始錄影", std::wstring(err.begin(), err.end()), NIIF_ERROR);
+        TrayBalloon(a, app::i18n::T(L"無法開始錄影"), std::wstring(err.begin(), err.end()), NIIF_ERROR);
         return;
     }
     Log("rec.Start ok path=%s hud=%ld,%ld,%ld,%ld", U8(cfg.outPath).c_str(),
@@ -666,7 +681,7 @@ void StartRegionRecording(App& a, const RECT& region) {
     capwgc::RecorderConfig cfg;
     std::string err;
     if (!BuildConfig(a, true, region, nullptr, &cfg, &err)) {
-        TrayBalloon(a, L"無法開始錄影", std::wstring(err.begin(), err.end()), NIIF_ERROR);
+        TrayBalloon(a, app::i18n::T(L"無法開始錄影"), std::wstring(err.begin(), err.end()), NIIF_ERROR);
         return;
     }
     a.lastRegion = region;
@@ -678,7 +693,7 @@ void StartMonitorRecording(App& a, HMONITOR mon, const RECT& rect) {
     capwgc::RecorderConfig cfg;
     std::string err;
     if (!BuildConfig(a, false, RECT{}, nullptr, &cfg, &err)) {
-        TrayBalloon(a, L"無法開始錄影", std::wstring(err.begin(), err.end()), NIIF_ERROR);
+        TrayBalloon(a, app::i18n::T(L"無法開始錄影"), std::wstring(err.begin(), err.end()), NIIF_ERROR);
         return;
     }
     if (!mon) mon = MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
@@ -694,7 +709,7 @@ void StartWindowRecording(App& a, HWND target, const RECT& rect) {
     capwgc::RecorderConfig cfg;
     std::string err;
     if (!BuildConfig(a, false, RECT{}, target, &cfg, &err)) {
-        TrayBalloon(a, L"無法開始錄影", std::wstring(err.begin(), err.end()), NIIF_ERROR);
+        TrayBalloon(a, app::i18n::T(L"無法開始錄影"), std::wstring(err.begin(), err.end()), NIIF_ERROR);
         return;
     }
     BeginRecording(a, cfg, rect);
@@ -807,44 +822,45 @@ void DeliverSnip(App& a, const app::ScreenBitmap& bmp) {
             a.lastPath = path;
             savedPath = path;
             saved = true;
-            extra = L"\n已存檔：" + std::wstring(name);
+            extra = L"\n" + WFmt(app::i18n::T(L"已存檔：%s"), name);
         } else {
-            extra = L"\n（存檔失敗，但已進剪貼簿）";
+            extra = std::wstring(L"\n") + app::i18n::T(L"（存檔失敗，但已進剪貼簿）");
         }
     }
 
     std::wstring err;
     if (!app::CopyToClipboard(a.msgwnd, bmp, savedPath, &err)) {
         Log("snip clipboard FAILED: %s", U8(err).c_str());
-        TrayBalloon(a, L"截圖失敗", err, NIIF_ERROR);
+        TrayBalloon(a, app::i18n::T(L"截圖失敗"), err, NIIF_ERROR);
         return;
     }
     Log("snip clipboard ok %dx%d hdrop=%d", bmp.width(), bmp.height(),
         savedPath.empty() ? 0 : 1);
 
-    wchar_t msg[256];
-    swprintf_s(msg, L"%d × %d 像素，已複製到剪貼簿", bmp.width(), bmp.height());
-    const std::wstring full = std::wstring(msg) + extra;
+    const std::wstring full =
+        app::i18n::Fmt(app::i18n::T(L"%d × %d 像素，已複製到剪貼簿"), bmp.width(),
+                       bmp.height()) + extra;
 
     if (!saved) {
         // 沒真正寫出檔案就沒有「開啟」可做 —— 硬給 onClick 只會開到上一次的
         // 檔案，那比不能點更糟。所以標題也不提「點一下」。
-        TrayBalloon(a, L"已截圖", full,
+        TrayBalloon(a, app::i18n::T(L"已截圖"), full,
                     a.settings.snipSaveFile ? NIIF_WARNING : NIIF_INFO);
         return;
     }
     // 捕獲**指標**不是引用：這個 lambda 會被存進 Toast 活到提示消失，而 `a`
     // 是函式參數，函式一返回就沒了。
     App* ap = &a;
-    TrayBalloon(a, L"已截圖（點一下開啟）", full, NIIF_INFO,
+    TrayBalloon(a, app::i18n::T(L"已截圖（點一下開啟）"), full, NIIF_INFO,
                 [ap] { OpenLastFile(*ap); });
 }
 
 // 把裁好的圖丟給 OCR 引擎。像素直接從記憶體過去，不落地成檔案。
 void SendSnipToOcr(App& a, const app::ScreenBitmap& bmp) {
     if (!a.ocrAvailable || !a.ocr.running()) {
-        TrayBalloon(a, L"OCR 不可用",
-                    L"OCR 模型沒有載入成功，請看托盤提示或 log", NIIF_WARNING);
+        TrayBalloon(a, app::i18n::T(L"OCR 不可用"),
+                    app::i18n::T(L"OCR 模型沒有載入成功，請看托盤提示或 log"),
+                    NIIF_WARNING);
         return;
     }
     // 直接把記憶體裡的像素送過去。舊版是先寫一張暫存 PNG、再讓 Python 用
@@ -863,7 +879,7 @@ void SendSnipToOcr(App& a, const app::ScreenBitmap& bmp) {
                                 bmp.width() * 4);
     Log("ocr request id=%d %dx%d", a.snipOcrId, bmp.width(), bmp.height());
     if (a.snipOcrId <= 0) {
-        TrayBalloon(a, L"OCR 失敗", L"無法送出辨識請求", NIIF_ERROR);
+        TrayBalloon(a, app::i18n::T(L"OCR 失敗"), app::i18n::T(L"無法送出辨識請求"), NIIF_ERROR);
     }
 }
 
@@ -881,7 +897,7 @@ void OnSnipDone(App& a, const app::Overlay::SnipOutcome& o) {
         // 之後可能有人別的呼叫路徑忘了抓圖 —— 那時要能自己補救。
         std::wstring err;
         if (!a.snipFull.CaptureVirtualScreen(&err)) {
-            TrayBalloon(a, L"截圖失敗", err, NIIF_ERROR);
+            TrayBalloon(a, app::i18n::T(L"截圖失敗"), err, NIIF_ERROR);
             return;
         }
     }
@@ -890,7 +906,7 @@ void OnSnipDone(App& a, const app::Overlay::SnipOutcome& o) {
     if (!a.snipFull.CropTo(o.rect, &crop)) {
         Log("snip crop FAILED rect=%ld,%ld,%ld,%ld", o.rect.left, o.rect.top,
             o.rect.right, o.rect.bottom);
-        TrayBalloon(a, L"截圖失敗", L"選取範圍是空的", NIIF_WARNING);
+        TrayBalloon(a, app::i18n::T(L"截圖失敗"), app::i18n::T(L"選取範圍是空的"), NIIF_WARNING);
         a.snipFull.Free();
         return;
     }
@@ -921,7 +937,7 @@ void BeginSnip(App& a, bool wantOcr) {
     if (!a.snipFull.CaptureVirtualScreen(&err)) {
         Log("snip capture FAILED: %s", U8(err).c_str());
         a.mode = Mode::Idle;
-        TrayBalloon(a, L"截圖失敗", err, NIIF_ERROR);
+        TrayBalloon(a, app::i18n::T(L"截圖失敗"), err, NIIF_ERROR);
         return;
     }
 
@@ -990,7 +1006,8 @@ void ShowOcrResult(App& a, const app::OcrResult& r) {
     // 會以為剪貼簿裡有東西，貼下去才發現是舊的。
     if (text.empty()) {
         Log("ocr clip: no text");
-        TrayBalloon(a, L"沒有辨識到文字", L"換一個範圍再試一次", NIIF_WARNING);
+        TrayBalloon(a, app::i18n::T(L"沒有辨識到文字"), app::i18n::T(L"換一個範圍再試一次"),
+                    NIIF_WARNING);
         return;
     }
 
@@ -1004,7 +1021,7 @@ void ShowOcrResult(App& a, const app::OcrResult& r) {
         Log("ocr clip: FAILED");
         std::wstring head = text.substr(0, 120);
         if (text.size() > 120) head += L"…";
-        TrayBalloon(a, L"OCR 完成（複製失敗，需手動抄）", head, NIIF_WARNING);
+        TrayBalloon(a, app::i18n::T(L"OCR 完成（複製失敗，需手動抄）"), head, NIIF_WARNING);
         return;
     }
 
@@ -1012,9 +1029,10 @@ void ShowOcrResult(App& a, const app::OcrResult& r) {
     // 只講「幾行、幾個字」，不重複內容 —— 內容已經在剪貼簿，貼出來就看到了。
     // 前面若有一則「已截圖」還在畫面上，這一則會直接換掉它（自己的視窗
     // 沒有佇列，見 TrayBalloon 的說明）。
-    wchar_t msg[96];
-    swprintf_s(msg, L"已複製 %zu 行／%zu 字，直接貼上即可", r.lines.size(), text.size());
-    TrayBalloon(a, L"辨識完成", msg, NIIF_INFO);
+    const std::wstring msg =
+        app::i18n::Fmt(app::i18n::T(L"已複製 %zu 行／%zu 字，直接貼上即可"),
+                       r.lines.size(), text.size());
+    TrayBalloon(a, app::i18n::T(L"辨識完成"), msg, NIIF_INFO);
 }
 
 // ---- 漂浮控件的點擊 ---------------------------------------------------------
@@ -1034,13 +1052,13 @@ void OnControlBar(App& a, app::ControlBar::Button b) {
         // 這次錄影沒有麥克風軌（設定沒勾，或端點被獨佔開不起來）。鈕畫成灰的
         // 很容易被當成「壞了」，所以點下去要講清楚原因。
         const capwgc::RecorderStats st = a.rec ? a.rec->stats() : capwgc::RecorderStats{};
-        std::wstring msg = L"這次錄影沒有麥克風音軌";
+        std::wstring msg = app::i18n::T(L"這次錄影沒有麥克風音軌");
         if (!st.audioNote.empty()) {
             msg += L"\n" + std::wstring(st.audioNote.begin(), st.audioNote.end());
         } else {
-            msg += L"\n在設定裡勾選「麥克風」後再錄一次";
+            msg += std::wstring(L"\n") + app::i18n::T(L"在設定裡勾選「麥克風」後再錄一次");
         }
-        TrayBalloon(a, L"沒有麥克風", msg, NIIF_INFO);
+        TrayBalloon(a, app::i18n::T(L"沒有麥克風"), msg, NIIF_INFO);
         return;
     }
 
@@ -1089,19 +1107,20 @@ void FinishRecording(App& a) {
         a.lastError = !st.error.empty() ? st.error
                      : (st.inited ? "沒有寫入任何畫面（目標可能完全靜止）"
                                   : "沒有收到任何畫面");
-        TrayBalloon(a, L"錄影失敗", std::wstring(a.lastError.begin(), a.lastError.end()),
+        TrayBalloon(a, app::i18n::T(L"錄影失敗"), std::wstring(a.lastError.begin(), a.lastError.end()),
                     NIIF_ERROR);
     } else {
         a.lastPath = path;
         const double mb = (double)st.bytes / 1048576.0;
-        wchar_t buf[256];
-        swprintf_s(buf, L"%s  %.1f 秒  %.1f MB  %hs",
-                   path.substr(path.find_last_of(L'\\') + 1).c_str(), st.seconds, mb,
-                   st.codecName.c_str());
+        // 檔名可以很長（MAX_PATH），翻譯也可以很長 —— 不要用固定緩衝區。
+        const std::wstring buf = app::i18n::Fmt(
+            app::i18n::T(L"%s  %.1f 秒  %.1f MB  %hs"),
+            path.substr(path.find_last_of(L'\\') + 1).c_str(), st.seconds, mb,
+            st.codecName.c_str());
         if (!st.audioNote.empty()) {
             // 畫面錄到了但音源沒開起來：不要讓它安靜地變成一個沒有聲音的檔案
-            TrayBalloon(a, L"已儲存（音源有問題）",
-                        std::wstring(buf) + L"\n" +
+            TrayBalloon(a, app::i18n::T(L"已儲存（音源有問題）"),
+                        buf + L"\n" +
                             std::wstring(st.audioNote.begin(), st.audioNote.end()),
                         NIIF_WARNING);
         } else {
@@ -1111,7 +1130,7 @@ void FinishRecording(App& a) {
             // 捕獲**指標**不是引用：這個 lambda 會被存進 Toast，活到提示消失
             // 為止，而 `a` 是函式參數，函式一返回就沒了。
             App* ap = &a;
-            TrayBalloon(a, L"已儲存（點一下開啟）", buf, NIIF_INFO,
+            TrayBalloon(a, app::i18n::T(L"已儲存（點一下開啟）"), buf, NIIF_INFO,
                         [ap] { OpenLastFile(*ap); });
         }
     }
@@ -1152,7 +1171,8 @@ void ResetBarPos(App& a) {
         a.bar.Show(a.captureRect, a.rec->hasMic(), nullptr);
     }
     Log("bar position reset");
-    TrayBalloon(a, L"控件位置已重設", L"回到右下角（錄影中會立刻歸位）", NIIF_INFO);
+    TrayBalloon(a, app::i18n::T(L"控件位置已重設"),
+                app::i18n::T(L"回到右下角（錄影中會立刻歸位）"), NIIF_INFO);
 }
 
 void ShowTrayMenu(App& a) {
@@ -1163,11 +1183,16 @@ void ShowTrayMenu(App& a) {
 
     // 選單上的熱鍵文字要跟著設定走：寫死 Ctrl+Alt+A 的話，使用者改完熱鍵
     // 會看到兩個互相矛盾的說明，然後開始懷疑自己有沒有改成功。
-    const std::wstring mRegion = L"錄製區域\t" + app::HotkeyText(hk.region);
-    const std::wstring mPicker = L"選擇視窗…\t" + app::HotkeyText(hk.picker);
-    const std::wstring mScreen = L"錄製主螢幕\t" + app::HotkeyText(hk.screen);
-    const std::wstring mStop = L"停止\t" + app::HotkeyText(hk.stop);
-    const std::wstring mSnip = L"截圖 / OCR\t" + app::HotkeyText(hk.snip);
+    const std::wstring mRegion = std::wstring(app::i18n::T(L"錄製區域")) + L"\t" +
+                                 app::HotkeyText(hk.region);
+    const std::wstring mPicker = std::wstring(app::i18n::T(L"選擇視窗…")) + L"\t" +
+                                 app::HotkeyText(hk.picker);
+    const std::wstring mScreen = std::wstring(app::i18n::T(L"錄製主螢幕")) + L"\t" +
+                                 app::HotkeyText(hk.screen);
+    const std::wstring mStop = std::wstring(app::i18n::T(L"停止")) + L"\t" +
+                               app::HotkeyText(hk.stop);
+    const std::wstring mSnip = std::wstring(app::i18n::T(L"截圖 / OCR")) + L"\t" +
+                               app::HotkeyText(hk.snip);
 
     // 「選擇視窗」放第一位：它是最常用的入口（托盤單擊也是它），而且它不
     // 會立刻開始做任何事 —— 先選來源、再決定要錄什麼，順序上就該排最前面。
@@ -1183,13 +1208,13 @@ void ShowTrayMenu(App& a) {
     const bool snipBusy = (a.mode != Mode::Idle && a.mode != Mode::Picking);
     AppendMenuW(m, MF_STRING | (snipBusy ? MF_GRAYED : 0), IDM_SNIP, mSnip.c_str());
     AppendMenuW(m, MF_STRING | (snipBusy ? MF_GRAYED : 0), IDM_SNIP_OCR,
-                L"截圖後直接 OCR");
+                app::i18n::T(L"截圖後直接 OCR"));
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(m, MF_STRING | (busy ? MF_GRAYED : 0), IDM_SETTINGS, L"設定…");
-    AppendMenuW(m, MF_STRING, IDM_RESETBAR, L"重設控件位置");
-    AppendMenuW(m, MF_STRING, IDM_FOLDER, L"開啟輸出資料夾");
+    AppendMenuW(m, MF_STRING | (busy ? MF_GRAYED : 0), IDM_SETTINGS, app::i18n::T(L"設定…"));
+    AppendMenuW(m, MF_STRING, IDM_RESETBAR, app::i18n::T(L"重設控件位置"));
+    AppendMenuW(m, MF_STRING, IDM_FOLDER, app::i18n::T(L"開啟輸出資料夾"));
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(m, MF_STRING, IDM_QUIT, L"結束");
+    AppendMenuW(m, MF_STRING, IDM_QUIT, app::i18n::T(L"結束"));
 
     POINT pt{};
     GetCursorPos(&pt);
@@ -1248,7 +1273,12 @@ void ShowTrayMenu(App& a) {
 void OpenSettings(App& a) {
     app::Settings next = a.settings;
     bool wantPrtsc = false;
-    if (!app::ShowSettingsDialog(a.msgwnd, &next, &wantPrtsc)) return;
+    if (!app::ShowSettingsDialog(a.msgwnd, &next, &wantPrtsc)) {
+        // 設定視窗裡換語言是**當場生效**的（重建頁面），按取消就要退回去，
+        // 否則會出現「介面變了但 ini 沒變」—— 下次啟動又變回來，很像 bug。
+        app::i18n::Load(a.settings.lang.c_str());
+        return;
+    }
 
     // PrtScn 接管要先處理，而且**要在其他設定套用之前**判斷它成不成功：
     // 它牽涉到系統設定與熱鍵兩種副作用，失敗時 next 會被打回原狀的部分
@@ -1258,13 +1288,13 @@ void OpenSettings(App& a) {
         std::wstring why;
         if (!EngagePrtScn(a, &why)) {
             next.hotkeys = a.settings.hotkeys;   // 熱鍵已經回滾過了，這裡同步欄位
-            TrayBalloon(a, L"PrtScn 沒有接手成功", why, NIIF_WARNING);
+            TrayBalloon(a, app::i18n::T(L"PrtScn 沒有接手成功"), why, NIIF_WARNING);
             // 其餘設定照收 —— 一個系統設定被鎖住不該讓使用者白填整個頁面。
         }
     } else if (!wantPrtsc && wasOwned) {
         std::wstring why;
         if (!ReleasePrtScn(a, &why)) {
-            TrayBalloon(a, L"PrtScn 還原失敗", why, NIIF_WARNING);
+            TrayBalloon(a, app::i18n::T(L"PrtScn 還原失敗"), why, NIIF_WARNING);
         }
         next.hotkeys = a.settings.hotkeys;
     }
@@ -1273,8 +1303,9 @@ void OpenSettings(App& a) {
     const app::Hotkeys want = next.hotkeys;
     if (!ApplyHotkeys(a, want, &failed)) {
         next.hotkeys = a.settings.hotkeys;   // 保留舊的可用組合
-        TrayBalloon(a, L"熱鍵沒有套用",
-                    L"「" + failed + L"」的組合已被其他程式使用，已維持原本的熱鍵",
+        TrayBalloon(a, app::i18n::T(L"熱鍵沒有套用"),
+                    WFmt(app::i18n::T(L"「%s」的組合已被其他程式使用，已維持原本的熱鍵"),
+                         failed.c_str()),
                     NIIF_WARNING);
     }
     a.settings = next;
@@ -1387,7 +1418,8 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             if (!st.inited && !a->warnedNoFrame &&
                 GetTickCount64() - a->startTick > 4000) {
                 a->warnedNoFrame = true;
-                TrayBalloon(*a, L"等不到畫面", L"擷取目標沒有送出任何幀，已停止",
+                TrayBalloon(*a, app::i18n::T(L"等不到畫面"),
+                        app::i18n::T(L"擷取目標沒有送出任何幀，已停止"),
                             NIIF_WARNING);
                 StopRecording(*a);
             }
@@ -1892,6 +1924,13 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
     }
     if (argv) LocalFree(argv);
 
+    // 介面語言要在**任何 UI 之前**載入：托盤提示、選單、設定視窗都直接查表，
+    // 而下面幾行就有 MessageBox（Media Foundation 失敗、單一實例）。
+    app::i18n::LoadFromIni();
+    // 留一行 log：使用者回報「介面變成英文／還是中文」時，先看這裡是
+    // 「選了什麼語言」還是「語系檔沒帶到」（LoadNote 會寫出檔案路徑）。
+    Log("i18n %s", U8(app::i18n::LoadNote()).c_str());
+
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     const HRESULT mf = MFStartup(MF_VERSION, MFSTARTUP_FULL);
     ui::SetCaptureExclusion(!allowCapture);
@@ -1965,7 +2004,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
     }
 
     if (FAILED(mf)) {
-        MessageBoxW(nullptr, L"Media Foundation 啟動失敗，無法錄影。", L"CapWGC",
+        MessageBoxW(nullptr, app::i18n::T(L"Media Foundation 啟動失敗，無法錄影。"), L"CapWGC",
                     MB_ICONERROR);
         CoUninitialize();
         return 1;
@@ -1974,7 +2013,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
     // 單一實例：兩個托盤圖示會讓人分不清哪個在錄。
     HANDLE once = CreateMutexW(nullptr, TRUE, L"CapWGC.SingleInstance");
     if (once && GetLastError() == ERROR_ALREADY_EXISTS) {
-        MessageBoxW(nullptr, L"CapWGC 已經在執行（請看系統匣）。", L"CapWGC",
+        MessageBoxW(nullptr, app::i18n::T(L"CapWGC 已經在執行（請看系統匣）。"), L"CapWGC",
                     MB_ICONINFORMATION);
         if (SUCCEEDED(mf)) MFShutdown();
         CoUninitialize();
@@ -1984,14 +2023,19 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
     App app;
     g_app = &app;
     app.settings.Load();
-    app.iconIdle = ui::MakeDotIcon(false, GetSystemMetrics(SM_CXSMICON));
-    app.iconRec = ui::MakeDotIcon(true, GetSystemMetrics(SM_CXSMICON));
+    // ini 沒有 [ui] lang（第一次執行、或從舊版升級）→ 把偵測到的語言寫回去。
+    // 不寫回去的話，使用者下次換了系統語言，介面就會跟著跳 —— 那不是他改的。
+    if (app.settings.lang.empty()) app.settings.lang = app::i18n::Current();
+    app.iconIdle = ui::LoadTrayIcon(false, GetSystemMetrics(SM_CXSMICON));
+    app.iconRec = ui::LoadTrayIcon(true, GetSystemMetrics(SM_CXSMICON));
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
     wc.lpfnWndProc = WndProc;
     wc.hInstance = GetModuleHandleW(nullptr);
     wc.hCursor = LoadCursorW(nullptr, (LPCWSTR)IDC_ARROW);
+    wc.hIcon = ui::LoadAppIcon(GetSystemMetrics(SM_CXICON));
+    wc.hIconSm = ui::LoadAppIcon(GetSystemMetrics(SM_CXSMICON));
     wc.lpszClassName = kClassName;
     RegisterClassExW(&wc);
 
@@ -2034,13 +2078,13 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
                 app.snipOcrId = 0;
                 if (!r.ok) {
                     Log("ocr FAILED: %s", U8(r.error).c_str());
-                    TrayBalloon(app, L"OCR 失敗", r.error, NIIF_ERROR);
+                    TrayBalloon(app, app::i18n::T(L"OCR 失敗"), r.error, NIIF_ERROR);
                     return;
                 }
                 Log("ocr ok lines=%zu ms=%d", r.lines.size(), r.ms);
                 ShowOcrResult(app, r);
             },
-            [&app](bool ok, const std::wstring& detail) {
+            [&app](bool ok, const std::wstring& detail, const std::wstring& param) {
                 app.ocrStarting = false;
                 app.ocrAvailable = ok;
                 Log("ocr ready=%d detail=%s", ok ? 1 : 0, U8(detail).c_str());
@@ -2059,6 +2103,16 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
                 //      警告打擾比沒有 OCR 更煩，所以只講一次。
                 //   2. 其他（模型損壞、推論失敗）—— 可能是環境問題，每次都要講，
                 //      否則使用者只會看到 OCR 莫名變灰。
+                // detail 是**原文**（ocr.cpp 刻意不翻譯它）：下面那幾個 find()
+                // 靠原文分類「安裝不完整（只講一次）」與「執行期失敗（每次都講）」，
+                // 翻過的句子不會包含翻過的片段。要顯示時才過 i18n。
+                //
+                // 含參數的句子（版本字串、載入錯誤）由 param 傳進來，這裡才代入
+                // —— 值一旦併進 detail，就永遠查不到語系檔的 key，會顯示中文。
+                const std::wstring dtext =
+                    param.empty()
+                        ? app::i18n::Ts(detail)
+                        : app::i18n::Fmt(app::i18n::Ts(detail).c_str(), param.c_str());
                 const bool notInstalled =
                     detail.find(L"找不到 models") != std::wstring::npos ||
                     detail.find(L"models 目錄不完整") != std::wstring::npos ||
@@ -2075,15 +2129,16 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
                 if (notInstalled) {
                     app.settings.ocrWarned = true;
                     app.settings.Save();
-                    TrayBalloon(app, L"OCR 未啟用（只提示這一次）",
-                                L"OCR 需要的檔案不在（models\\ 或 onnxruntime.dll），"
-                                L"工具列的 OCR 會保持灰色。\n"
-                                L"錄影、截圖、框選都不受影響，可以忽略這則訊息。\n"
-                                L"解壓縮時請把 models 目錄與 onnxruntime.dll 一起保留。",
+                    TrayBalloon(app, app::i18n::T(L"OCR 未啟用（只提示這一次）"),
+                                app::i18n::T(L"OCR 需要的檔案不在（models\\ 或 onnxruntime.dll），"
+                                        L"工具列的 OCR 會保持灰色。\n"
+                                        L"錄影、截圖、框選都不受影響，可以忽略這則訊息。\n"
+                                        L"解壓縮時請把 models 目錄與 onnxruntime.dll 一起保留。"),
                                 NIIF_INFO);
                 } else {
-                    TrayBalloon(app, L"OCR 未啟用",
-                                detail + L"\n截圖功能不受影響", NIIF_WARNING);
+                    TrayBalloon(app, app::i18n::T(L"OCR 未啟用"),
+                                WFmt(app::i18n::T(L"%s\n截圖功能不受影響"), dtext.c_str()),
+                                NIIF_WARNING);
                 }
             },
             // 空字串 = 用 exe 旁邊的 models\。模型目錄不再開放設定（見
@@ -2116,19 +2171,20 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
     auto Add = [&tip](const wchar_t* what, const app::Hotkey& k) {
         if (!k.set()) return;
         if (!tip.empty()) tip += L"\n";
-        tip += std::wstring(what) + L"：" + app::HotkeyText(k);
+        tip += WFmt(app::i18n::T(L"%s：%s"), what, app::HotkeyText(k).c_str());
     };
-    Add(L"截圖／OCR", hk.snip);
-    Add(L"選擇視窗", hk.picker);
-    Add(L"選區域錄影", hk.region);
-    Add(L"錄主螢幕", hk.screen);
-    Add(L"停止", hk.stop);
-    if (tip.empty()) tip = L"目前沒有綁任何熱鍵，可從托盤或設定指定。";
+    Add(app::i18n::T(L"截圖／OCR"), hk.snip);
+    Add(app::i18n::T(L"選擇視窗"), hk.picker);
+    Add(app::i18n::T(L"選區域錄影"), hk.region);
+    Add(app::i18n::T(L"錄主螢幕"), hk.screen);
+    Add(app::i18n::T(L"停止"), hk.stop);
+    if (tip.empty()) tip = app::i18n::T(L"目前沒有綁任何熱鍵，可從托盤或設定指定。");
     if (badHotkey.empty()) {
-        TrayBalloon(app, L"CapWGC 已啟動", tip, NIIF_INFO);
+        TrayBalloon(app, app::i18n::T(L"CapWGC 已啟動"), tip, NIIF_INFO);
     } else {
-        TrayBalloon(app, L"CapWGC 已啟動（有熱鍵被佔用）",
-                    tip + L"\n\n「" + badHotkey + L"」被其他程式佔用，請到設定換一組",
+        TrayBalloon(app, app::i18n::T(L"CapWGC 已啟動（有熱鍵被佔用）"),
+                    tip + WFmt(app::i18n::T(L"\n\n「%s」被其他程式佔用，請到設定換一組"),
+                               badHotkey.c_str()),
                     NIIF_WARNING);
     }
 

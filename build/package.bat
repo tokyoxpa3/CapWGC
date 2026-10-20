@@ -57,6 +57,12 @@ rem out and everything else still works.
 copy /y "%ROOT%\third_party\onnxruntime\lib\onnxruntime.dll" "%STAGE%" >nul
 if errorlevel 1 (echo [pkg] FAILED: copy onnxruntime.dll & exit /b 1)
 
+rem Interface languages. Without locale\ the UI falls back to the source
+rem language (zh_TW) -- still usable, but the language picker would be a lie.
+if not exist "%STAGE%\locale" mkdir "%STAGE%\locale" 2>nul
+copy /y "%ROOT%\locale\*.json" "%STAGE%\locale" >nul
+if errorlevel 1 (echo [pkg] FAILED: copy locale & exit /b 1)
+
 if not exist "%STAGE%\models" mkdir "%STAGE%\models" 2>nul
 copy /y "%ROOT%\models\ppocr_det.onnx" "%STAGE%\models\" >nul
 copy /y "%ROOT%\models\ppocr_rec.onnx" "%STAGE%\models\" >nul
@@ -85,7 +91,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$t += '  CapWGC.exe          the app';" ^
   "$t += '  onnxruntime.dll     OCR inference engine';" ^
   "$t += '  models\             OCR models (det / rec / dict)';" ^
+  "$t += '  locale\             interface languages (one .json per language)';" ^
   "$t += 'Deleting models\ disables OCR only; recording and screenshots still work.';" ^
+  "$t += 'Deleting locale\ only forces the interface back to Traditional Chinese.';" ^
   "$t += '';" ^
   "$t += 'No installer, no Python, no VC++ redistributable.';" ^
   "[IO.File]::WriteAllLines('%STAGE%\README.txt', $t, (New-Object Text.UTF8Encoding $true))"

@@ -27,6 +27,7 @@
 // ============================================================================
 
 #include "picker.h"
+#include "i18n.h"
 #include "ui.h"
 
 #include <dwmapi.h>
@@ -449,7 +450,7 @@ bool Picker::MakeWinItem(HWND h, Item& out) {
     out.title = title;
     out.sub = ExeNameOf(pid);
     if (out.sub.empty()) out.sub = cls;
-    if (iconic) out.sub += L"　最小化";
+    if (iconic) out.sub += i18n::T(L"　最小化");
     if (out.title.empty()) out.title = out.sub;   // 連子視窗都沒有標題：至少給個名字
     return true;
 }
@@ -466,12 +467,13 @@ BOOL CALLBACK Picker::EnumMonProc(HMONITOR m, HDC, LPRECT, LPARAM lp) {
     it.primary = (mi.dwFlags & MONITORINFOF_PRIMARY) != 0;
 
     wchar_t title[64];
-    swprintf_s(title, L"螢幕 %d", (int)v->size() + 1);
+    swprintf_s(title, i18n::T(L"螢幕 %d"), (int)v->size() + 1);
     it.title = title;
 
     wchar_t sub[128];
     swprintf_s(sub, L"%d × %d%s", mi.rcMonitor.right - mi.rcMonitor.left,
-               mi.rcMonitor.bottom - mi.rcMonitor.top, it.primary ? L"　主螢幕" : L"");
+               mi.rcMonitor.bottom - mi.rcMonitor.top,
+                   it.primary ? i18n::T(L"　主螢幕") : L"");
     it.sub = sub;
 
     v->push_back(std::move(it));
@@ -791,6 +793,8 @@ bool Picker::CreateAndShow() {
     wc.hInstance = GetModuleHandleW(nullptr);
     wc.hCursor = LoadCursorW(nullptr, (LPCWSTR)IDC_ARROW);
     wc.hbrBackground = nullptr;   // 全部自己畫（避免開窗時閃一下白）
+    wc.hIcon = ui::LoadAppIcon(GetSystemMetrics(SM_CXICON));
+    wc.hIconSm = ui::LoadAppIcon(GetSystemMetrics(SM_CXSMICON));
     wc.lpszClassName = L"CapWGCPicker";
     RegisterClassExW(&wc);
 
@@ -820,7 +824,7 @@ bool Picker::CreateAndShow() {
     if (y < work.top) y = work.top;
 
     hwnd_ = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, L"CapWGCPicker",
-                            L"CapWGC 選擇來源", WS_POPUP | WS_VSCROLL, x, y, w, h, nullptr,
+                            i18n::T(L"CapWGC 選擇來源"), WS_POPUP | WS_VSCROLL, x, y, w, h, nullptr,
                             nullptr, GetModuleHandleW(nullptr), this);
     if (!hwnd_) return false;
     SetWindowLongPtrW(hwnd_, GWLP_USERDATA, (LONG_PTR)this);
@@ -920,14 +924,30 @@ void Picker::Layout() {
         tabRect_[i] = RECT{x, headerH + S(8), x + tw, headerH + S(8) + th};
     }
 
-    const int bw = S(112), bh = S(32), bw2 = S(84);
+    // 按鈕寬度照文字量。原本是固定的 112 / 84，那是照中文給的：西班牙文
+    // 「Configuración」比「設定」寬一倍，固定寬度會把字切掉（看起來像 bug，
+    // 而且是只有那個語言才看得到的 bug）。量一次字寬再加左右留白。
+    auto textW = [this](const wchar_t* s) {
+        HDC dc = GetDC(hwnd_);
+        HGDIOBJ old = SelectObject(dc, fontBtn_);
+        SIZE sz{};
+        GetTextExtentPoint32W(dc, s, (int)wcslen(s), &sz);
+        SelectObject(dc, old);
+        ReleaseDC(hwnd_, dc);
+        return (int)sz.cx;
+    };
+    const int btnPad = S(20);
+    const int bh = S(32);
+    const int bw = std::max(S(112), textW(i18n::T(L"開始錄影")) + btnPad);
+    const int bwCancel = std::max(S(84), textW(i18n::T(L"取消")) + btnPad);
+    const int bwSetup = std::max(S(84), textW(i18n::T(L"設定")) + btnPad);
     const int by = footer_.top + (footerH - bh) / 2;
     btnOk_ = RECT{rc.right - padX - bw, by, rc.right - padX, by + bh};
-    btnCancel_ = RECT{btnOk_.left - S(8) - bw2, by, btnOk_.left - S(8), by + bh};
+    btnCancel_ = RECT{btnOk_.left - S(8) - bwCancel, by, btnOk_.left - S(8), by + bh};
     // 「設定」放在最左邊，和右邊那三顆（取消 / 開始錄影）分開 —— 它不是這個
     // 對話框的主角，但也不該藏進右鍵選單：托盤單擊之後這裡就是「程式主視窗」，
     // 使用者習慣從主視窗找設定，而不是回頭去摸托盤。
-    btnSetup_ = RECT{padX, by, padX + bw2, by + bh};
+    btnSetup_ = RECT{padX, by, padX + bwSetup, by + bh};
 
     auto& v = cur();
     for (size_t i = 0; i < v.size(); ++i) {
@@ -972,7 +992,7 @@ void Picker::UpdateScroll() {
 // ============================================================================
 
 void Picker::DrawTabs(HDC dc) {
-    const wchar_t* names[3] = {L"視窗", L"螢幕", L"區域"};
+    const wchar_t* names[3] = {i18n::T(L"視窗"), i18n::T(L"螢幕"), i18n::T(L"區域")};
     for (int i = 0; i < 3; ++i) {
         const RECT r = tabRect_[i];
         const bool active = (tab_ == i);
@@ -1052,7 +1072,7 @@ void Picker::DrawCard(HDC dc, int idx, bool selected, bool hover) {
         SelectObject(dc, fontSub_);
         SetTextColor(dc, kSub);
         RECT t = th;
-        DrawTextW(dc, L"拖曳框選", -1, &t,
+        DrawTextW(dc, i18n::T(L"拖曳框選"), -1, &t,
                   DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
     } else if (it.icon) {
         // 有圖示就畫圖示：一整排「無法預覽」根本看不出誰是誰
@@ -1064,7 +1084,7 @@ void Picker::DrawCard(HDC dc, int idx, bool selected, bool hover) {
         SelectObject(dc, fontSub_);
         SetTextColor(dc, kSub);
         RECT t = th;
-        DrawTextW(dc, L"無法預覽", -1, &t,
+        DrawTextW(dc, i18n::T(L"無法預覽"), -1, &t,
                   DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
     }
     RestoreDC(dc, saved);
@@ -1103,9 +1123,9 @@ void Picker::DrawGrid(HDC dc) {
         SelectObject(dc, fontItem_);
         SetTextColor(dc, kSub);
         RECT t = viewport_;
-        const wchar_t* msg = tab_ == 0   ? L"找不到可以錄製的視窗"
-                            : tab_ == 1 ? L"找不到螢幕"
-                                        : L"無法建立框選項目";
+        const wchar_t* msg = tab_ == 0   ? i18n::T(L"找不到可以錄製的視窗")
+                            : tab_ == 1 ? i18n::T(L"找不到螢幕")
+                                        : i18n::T(L"無法建立框選項目");
         DrawTextW(dc, msg, -1, &t,
                   DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
     }
@@ -1143,12 +1163,34 @@ void Picker::DrawFooter(HDC dc) {
     RECT hint{btnSetup_.right + S(16), footer_.top, btnCancel_.left - S(12), footer_.bottom};
     // 第二句不是裝飾：選擇器開著的時候截圖熱鍵**仍然有效**（它會先關掉這個
     // 視窗再截圖），但使用者不會知道 —— 沒有這行字，那條路等於不存在。
-    DrawTextW(dc, L"點一下選取，點兩下或按 Enter 開始錄影（截圖熱鍵仍可用）", -1, &hint,
-              DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+    //
+    // 這段話在中文只有 26 個字，一行放得下；但德文／法文／俄文翻出來是中文
+    // 的兩倍長，硬用 DT_SINGLELINE 就會吃掉後半句「截圖熱鍵仍可用」——正好
+    // 是最需要被看到的那半句。所以先量寬度：放得下就一行，放不下就折成兩行
+    // （頁尾 46px 夠塞 9pt 兩行，按鈕 32px 置中，視覺上不會歪）。
+    const wchar_t* hintText = i18n::T(L"點一下選取，點兩下或按 Enter 開始錄影（截圖熱鍵仍可用）");
+    RECT one = hint;
+    DrawTextW(dc, hintText, -1, &one, DT_SINGLELINE | DT_CALCRECT | DT_NOPREFIX);
+    if (one.right - one.left <= hint.right - hint.left) {
+        DrawTextW(dc, hintText, -1, &hint,
+                  DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+    } else {
+        // DT_CALCRECT 回報的高度是「文字方塊」高度，不含最後一行的下伸部
+        // （g、p、括號）；照它置中，第二行會被視窗下緣削掉一點。所以量完再加
+        // 幾 px 餘裕，並且不讓它超出頁尾。
+        RECT two = hint;
+        two.bottom = hint.top + S(400);
+        DrawTextW(dc, hintText, -1, &two, DT_WORDBREAK | DT_CALCRECT | DT_NOPREFIX);
+        const int th = (two.bottom - two.top) + S(4);
+        int top = hint.top + ((footer_.bottom - hint.top) - th) / 2;
+        if (top < hint.top) top = hint.top;
+        RECT fit{hint.left, top, hint.right, top + th};
+        DrawTextW(dc, hintText, -1, &fit, DT_WORDBREAK | DT_NOPREFIX);
+    }
 
-    DrawButton(dc, btnSetup_, L"設定", false, hoverBtn_ == 3);
-    DrawButton(dc, btnCancel_, L"取消", false, hoverBtn_ == 2);
-    DrawButton(dc, btnOk_, L"開始錄影", true, hoverBtn_ == 1);
+    DrawButton(dc, btnSetup_, i18n::T(L"設定"), false, hoverBtn_ == 3);
+    DrawButton(dc, btnCancel_, i18n::T(L"取消"), false, hoverBtn_ == 2);
+    DrawButton(dc, btnOk_, i18n::T(L"開始錄影"), true, hoverBtn_ == 1);
 }
 
 void Picker::Paint() {
@@ -1168,13 +1210,13 @@ void Picker::Paint() {
     SelectObject(mem, fontTitle_);
     SetTextColor(mem, kText);
     RECT tr{S(24), 0, rc.right - S(24), S(52)};
-    DrawTextW(mem, L"選擇要錄製的畫面", -1, &tr,
+    DrawTextW(mem, i18n::T(L"選擇要錄製的畫面"), -1, &tr,
               DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
 
     SelectObject(mem, fontSub_);
     SetTextColor(mem, kSub);
     RECT hr{S(24), 0, rc.right - S(24), S(52)};
-    DrawTextW(mem, L"Esc 取消", -1, &hr,
+    DrawTextW(mem, i18n::T(L"Esc 取消"), -1, &hr,
               DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_NOPREFIX);
 
     RECT hline{0, S(52) - 1, rc.right, S(52)};
@@ -1239,8 +1281,8 @@ void Picker::BuildRegionCard() {
     region_.clear();
     Item it;
     it.region = true;
-    it.title = L"自訂範圍";
-    it.sub = L"拖曳框選要錄製的區域";
+    it.title = i18n::T(L"自訂範圍");
+    it.sub = i18n::T(L"拖曳框選要錄製的區域");
     region_.push_back(std::move(it));
 }
 

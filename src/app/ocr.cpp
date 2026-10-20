@@ -108,9 +108,13 @@ void OcrEngine::WorkerMain() {
     // 解參考，那是 access violation 不是例外，會直接把行程收掉（連 log 都還來
     // 不及寫）。所以先驗 API 版本，失敗就只讓 OCR 變灰色。
     if (const char* why = capwgc::OcrRuntimeError()) {
-        PostReady(false, L"OCR 推論引擎版本不相容（" +
-                         std::wstring(why, why + std::strlen(why)) +
-                         L"）。OCR 會保持灰色，其他功能不受影響");
+        {
+            // 版本字串來自 OcrRuntimeError()（英文）。原文當 key、值另外傳：
+            // 併進句子裡就查不到語系檔（key 是「…（%s）…」），會顯示中文。
+            const std::wstring ver(why, why + std::strlen(why));
+            PostReady(false, L"OCR 推論引擎版本不相容（%s）。OCR 會保持灰色，其他功能不受影響",
+                      ver);
+        }
         return;
     }
 
@@ -132,7 +136,10 @@ void OcrEngine::WorkerMain() {
     auto engine = std::make_unique<capwgc::OcrOnnx>();
     std::string err;
     if (!engine->Load(det, rec, dict, &err)) {
-        PostReady(false, L"OCR 模型載入失敗：" + std::wstring(err.begin(), err.end()));
+        {
+            PostReady(false, L"OCR 模型載入失敗：%s",
+                      std::wstring(err.begin(), err.end()));
+        }
         return;
     }
     ready_ = 1;
@@ -231,9 +238,10 @@ void OcrEngine::PostDone(const OcrResult& r) {
     if (!PostMessageW(wnd_, msg_, 1, (LPARAM)heap)) delete heap;
 }
 
-void OcrEngine::PostReady(bool ready, const std::wstring& detail) {
+void OcrEngine::PostReady(bool ready, const std::wstring& detail,
+                          const std::wstring& param) {
     if (!wnd_) return;
-    auto* heap = new std::wstring(detail);
+    auto* heap = new ReadyNote{detail, param};
     if (!PostMessageW(wnd_, msg_, ready ? 2 : 3, (LPARAM)heap)) delete heap;
 }
 
@@ -246,8 +254,10 @@ void OcrEngine::HandleMessage(WPARAM wParam, LPARAM lParam) {
     }
     case 2:
     case 3: {
-        std::unique_ptr<std::wstring> d(reinterpret_cast<std::wstring*>(lParam));
-        if (onReady_) onReady_(wParam == 2, d ? *d : std::wstring());
+        std::unique_ptr<ReadyNote> n(reinterpret_cast<ReadyNote*>(lParam));
+        if (onReady_)
+            onReady_(wParam == 2, n ? n->detail : std::wstring(),
+                     n ? n->param : std::wstring());
         break;
     }
     default:

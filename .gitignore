@@ -46,3 +46,16 @@ dist/
 
 # ---- 工具產生的專案資料 ----
 .workbuddy-ai/
+
+# ---- 不進版控的工作筆記 ----
+# HANDOFF.md / docs\ / tools\ 是本機的設計筆記與量測腳本：內容是「試過什麼、
+# 數字是多少、為什麼最後選這個」，寫給自己看的，也隨時會改寫，不跟著專案
+# 發布。檔案留在工作目錄裡（README 提到的建置流程仍然需要 tools\），只是
+# 不進版控。
+#
+# 注意：.gitignore 對**已經被追蹤**的檔案無效，第一次要搭配
+#   git rm -r --cached docs tools HANDOFF.md
+# 才會真的從 repo 移除（工作目錄的檔案不會被刪）。
+HANDOFF.md
+docs/
+tools/
