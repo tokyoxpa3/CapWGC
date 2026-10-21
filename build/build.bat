@@ -308,6 +308,7 @@ cl %CFLAGS% /I"%ROOT%\third_party\onnxruntime\include" ^
    "%ROOT%\src\app\overlay.cpp" "%ROOT%\src\app\picker.cpp" ^
    "%ROOT%\src\app\controlbar.cpp" ^
    "%ROOT%\src\app\settings.cpp" ^
+   "%ROOT%\src\app\autostart.cpp" ^
    "%ROOT%\src\app\i18n.cpp" ^
    "%ROOT%\src\app\snip.cpp" "%ROOT%\src\app\ocr.cpp" ^
    "%ROOT%\src\core\ocr_onnx.cpp" ^

@@ -4,6 +4,7 @@
 
 #include "settings.h"
 
+#include "autostart.h"   // 開機自動啟動（狀態的真實來源是註冊表）
 #include "i18n.h"
 #include "ui.h"   // ui::LoadAppIcon（視窗圖示）
 
@@ -47,6 +48,8 @@ constexpr int IDC_SNIP_DIR_BROWSE = 1033;
 constexpr int IDC_PRTSN_TAKE = 1034;
 constexpr int IDC_PRTSN_NOTE = 1035;
 constexpr int IDC_LANG = 1036;
+constexpr int IDC_AUTOSTART = 1037;
+constexpr int IDC_AUTOSTART_NOTE = 1038;
 
 // 換語言之後重建整個頁面（見 RebuildForLanguage）。用自訂訊息而不是直接
 // 呼叫：切換語言的通知是那個下拉選單自己送來的，不能在自己的通知處理序裡
@@ -370,6 +373,9 @@ void ReadBack(HWND h, Settings* s) {
     s->snipDir = GetText(h, IDC_SNIP_DIR);
     const int l = ComboSel(h, IDC_LANG);
     if (l >= 0 && l < i18n::LanguageCount()) s->lang = i18n::Languages()[l].code;
+    // 開機自動啟動：這裡只記「使用者要什麼」。真正的註冊表改動在呼叫端
+    // （OpenSettings），因為按取消不該留下副作用。
+    s->autoStart = IsDlgButtonChecked(h, IDC_AUTOSTART) == BST_CHECKED;
 
     // PrtScn 接管：勾選＝要 PrtScn 給截圖用。這裡只把「意圖」記進 hotkeys
     // （snip 綁上 PrtScn），**真正的系統設定在呼叫端才改** —— 設定視窗不該
@@ -395,10 +401,66 @@ void ReadBack(HWND h, Settings* s) {
 constexpr int kTabX = 12;
 constexpr int kTabY = 12;
 constexpr int kTabW = 452;
-// 300 → 320：多了「介面語言」那一行。高度改大會動到視窗尺寸（見
-// ShowSettingsDialog 的 476×384），兩邊必須一起改，否則按鈕會被切掉。
-constexpr int kTabH = 320;
+// 320 → 400：多了「開機時自動啟動」那一組（勾選框 + 兩行說明），同時把整頁的
+// 行距放寬。
+//
+// 這個數字是實測出來的，不是猜的。內容區可用高度 = kTabH − 籤頭與內縮
+// （TabCtrl_AdjustRect 的結果，實測約 40px）。kTabH=344 時最後一項「介面語言」
+// 收在 y=294、高 18（→312），被分頁內緣切掉半行；也就是當時的可用高度只到
+// y≈304。所以「一般」頁的內容底 = kTabH − 40，排版時必須留 4~8px 餘裕。
+//
+// 現在內容收到 y=332，故 kTabH = 400（332 + 40 = 372，留 28px 餘裕給其他語言
+// 折行後多出來的高度）。
+//
+// 高度改大會動到視窗尺寸（見 ShowSettingsDialog 的 476×464），兩邊必須一起改，
+// 否則按鈕會被切掉 —— 而且不會有任何錯誤訊息，只會看到半顆按鈕。
+//
+// **2026-10-21：kTabH 從此是「下限」，不是定值。** 「開機時自動啟動」那段說明
+// 在中文是兩行，但英文／日文／德文在 428px 寬下折成三行以上，34px 只放得下
+// 兩行 —— 第三行被切掉，殘骸還壓在下面的「介面語言」上（看起來像排版壞了，
+// 而且只有換過語言才看得到）。翻譯的長度不可能靠人工控制，所以改成量測：
+// 說明的高度用 DrawTextW(DT_CALCRECT) 算，語言列跟著往下讓，分頁與視窗再
+// 一起長高（見 MeasureNoteHeight / FitDialog）。中文維持 400，一個像素都不動。
+constexpr int kTabH = 400;
 constexpr int kPad = 4;    // 內容與分頁內緣的距離
+
+// 「一般」頁的垂直錨點：開機說明的上緣、說明寬度、說明最少高度。
+// 說明上緣 274 是勾選框（y=250、高 22）下面 2px。
+constexpr int kNoteY = 274;
+constexpr int kNoteW = 428;
+constexpr int kNoteMinH = 34;   // 兩行
+
+// 用對話框字型量「這段文字在 width 寬下折行後有多高」。
+//
+// 不能靠字數估：Segoe UI 的 CJK 是全寬、拉丁是半寬，同一句翻成德文會是中文的
+// 兩倍長；DPI 也要算進去（9pt 在 125% 下是 15px 而不是 12px）。所以直接讓
+// GDI 排版一次，取它回報的高度。
+int MeasureTextHeight(HWND h, const wchar_t* text, int width) {
+    if (!text || !*text) return 0;
+    HDC dc = GetDC(h);
+    if (!dc) return 0;
+    HGDIOBJ old = SelectObject(dc, g_dlg->font);
+    RECT r{0, 0, width, 0};
+    DrawTextW(dc, text, -1, &r, DT_WORDBREAK | DT_CALCRECT | DT_NOPREFIX);
+    SelectObject(dc, old);
+    ReleaseDC(h, dc);
+    return (int)(r.bottom - r.top);
+}
+
+// 把視窗高度調成「剛好放得下 tabH 高的分頁」：客戶區 = kTabY + tabH + 12 + 28 + 12。
+// 換語言時可能變高也可能變矮，所以兩邊都做 —— 只長不縮的話，從德文切回中文
+// 會留一大片空白。
+void FitDialog(HWND h, int tabH) {
+    RECT rc{0, 0, 476, kTabY + tabH + 12 + 28 + 12};
+    AdjustWindowRectEx(&rc, WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE, FALSE,
+                       WS_EX_CONTROLPARENT);
+    const int w = rc.right - rc.left;
+    const int hh = rc.bottom - rc.top;
+    RECT cur{};
+    GetWindowRect(h, &cur);
+    if ((cur.right - cur.left) == w && (cur.bottom - cur.top) == hh) return;
+    SetWindowPos(h, nullptr, 0, 0, w, hh, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
 
 void BuildControls(HWND h, const Settings& s) {
     const int dpi = GetDpiForWindow(h);
@@ -413,6 +475,15 @@ void BuildControls(HWND h, const Settings& s) {
     g_dlg->hk[2] = s.hotkeys.screen;
     g_dlg->hk[3] = s.hotkeys.stop;
     g_dlg->hk[4] = s.hotkeys.snip;
+
+    // 先量「開機時自動啟動」那段說明，才知道分頁要留多高（見 kTabH 的說明）。
+    // 一定要在建立分頁籤之前算：分頁控制項的高度是建立時給的。
+    const wchar_t* noteText = i18n::T(L"登錄到目前使用者的啟動項目，登入後常駐系統匣。\n"
+                                     L"只影響這個帳號，不需要系統管理員權限。");
+    const int noteH = std::max(kNoteMinH, MeasureTextHeight(h, noteText, kNoteW) + 4);
+    const int langY = kNoteY + noteH + 8;         // 「介面語言」那一列
+    // 內容底 = langY + 24（下拉選單高）；可用高度 = tabH − 40，再留 8px 餘裕。
+    const int tabH = std::max(kTabH, langY + 24 + 40 + 8);
     // 初始勾選狀態看「截圖熱鍵是不是 PrtScn」，而不是看 ini 的 owned 旗標。
     // 兩者可能不同步（例如使用者手改了 ini，或 PrtScn 被設定視窗清掉），
     // 而使用者看到的是熱鍵欄位 —— 它必須跟勾選框說同一件事。
@@ -421,7 +492,7 @@ void BuildControls(HWND h, const Settings& s) {
     // ---- 分頁籤 ----
     g_curPage = -1;   // 分頁籤本身不屬於任何一頁
     HWND tab = Child(h, WC_TABCONTROLW, L"", WS_TABSTOP | WS_CLIPSIBLINGS, kTabX, kTabY,
-                     kTabW, kTabH, IDC_TAB);
+                     kTabW, tabH, IDC_TAB);
     g_dlg->tab = tab;
     for (int i = 0; i < kPageCount; ++i) {
         TCITEMW it{};
@@ -507,12 +578,12 @@ void BuildControls(HWND h, const Settings& s) {
     SendMessageW(tb, TBM_SETTICFREQ, 10, 0);
     SendMessageW(tb, TBM_SETPOS, TRUE, s.quality);
 
-    // 三顆勾選框的寬度是照「最長的翻譯」給的，不是照中文：德文的
+    // 四顆勾選框的寬度是照「最長的翻譯」給的，不是照中文：德文的
     // 「Mauszeiger aufnehmen」在 110px 會被切成「aufneh」。中文看起來還留
     // 一堆空白，那是對的 —— 這裡的留白是給其他語言用的。
-    P(0, L"BUTTON", i18n::T(L"系統聲音"), BS_AUTOCHECKBOX, 0, 184, 122, 22, IDC_AUDIO_SYS);
-    P(0, L"BUTTON", i18n::T(L"麥克風"), BS_AUTOCHECKBOX, 126, 184, 100, 22, IDC_AUDIO_MIC);
-    P(0, L"BUTTON", i18n::T(L"錄下游標"), BS_AUTOCHECKBOX, 230, 184, 206, 22, IDC_CURSOR);
+    P(0, L"BUTTON", i18n::T(L"系統聲音"), BS_AUTOCHECKBOX, 0, 192, 122, 22, IDC_AUDIO_SYS);
+    P(0, L"BUTTON", i18n::T(L"麥克風"), BS_AUTOCHECKBOX, 126, 192, 100, 22, IDC_AUDIO_MIC);
+    P(0, L"BUTTON", i18n::T(L"錄下游標"), BS_AUTOCHECKBOX, 230, 192, 206, 22, IDC_CURSOR);
     CheckDlgButton(h, IDC_AUDIO_SYS, s.audioSystem ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(h, IDC_AUDIO_MIC, s.audioMic ? BST_CHECKED : BST_UNCHECKED);
     CheckDlgButton(h, IDC_CURSOR, s.captureCursor ? BST_CHECKED : BST_UNCHECKED);
@@ -520,9 +591,31 @@ void BuildControls(HWND h, const Settings& s) {
     // 分軌是給剪輯用的：檔案裡除了混音軌之外，每個音源再各留一條（標成
     // 「不要預設播」，所以一般播放器仍然只播混音軌）。預設關 —— 開了檔案
     // 會大一截，而且多數人只是錄完直接播。
-    P(0, L"BUTTON", i18n::T(L"保留分軌音源（給剪輯用，檔案較大）"), BS_AUTOCHECKBOX, 0, 210, 420,
+    P(0, L"BUTTON", i18n::T(L"保留分軌音源（給剪輯用，檔案較大）"), BS_AUTOCHECKBOX, 0, 220, 420,
       22, IDC_AUDIO_SEP);
     CheckDlgButton(h, IDC_AUDIO_SEP, s.separateTracks ? BST_CHECKED : BST_UNCHECKED);
+
+    // ---- 開機自動啟動 ----
+    //
+    // 放在「一般」頁、語言上面：這是「這個程式要不要常駐」的行為偏好，跟錄影
+    // 參數無關，但也不是 OCR／熱鍵 —— 使用者找它會先翻「一般」。
+    //
+    // 狀態來自**註冊表**（s.autoStart 由 Load() 查、Settings 不存它）：
+    // 使用者在工作管理員的「啟動」頁停用的話，這裡必須跟著顯示成未勾選，否則
+    // 勾著卻不啟動，看起來就是程式壞了。
+    P(0, L"BUTTON", i18n::T(L"開機時自動啟動"), BS_AUTOCHECKBOX | WS_TABSTOP, 0, 250, 420,
+      22, IDC_AUTOSTART);
+    if (s.autoStart) CheckDlgButton(h, IDC_AUTOSTART, BST_CHECKED);
+    // 這行說明是必要的，不是裝飾：它回答了「勾了會發生什麼、動到哪裡、需不需要
+    // 管理員權限」。預設開啟是一個會寫註冊表的預設值，不講清楚就變成偷偷來。
+    //
+    // 用 \n 手動斷在句號處，不要靠自動折行：中文沒有空白，自動折行會把逗號
+    // 丟到行首（實測「只影響這個帳號\n，不需要…」），看起來像排版壞了。
+    //
+    // 高度不再是寫死的 34：中文是兩行，但英文／日文／德文／俄文在 428px 下
+    // 會折成三行以上，34px 會把最後一行切掉（殘骸正好壓在下面的「介面語言」
+    // 上）。noteH 是上面量出來的值，語言列與分頁高度都跟著它讓。
+    P(0, L"STATIC", noteText, SS_LEFT, 0, kNoteY, kNoteW, noteH, IDC_AUTOSTART_NOTE);
 
     // ---- 介面語言 ----
     //
@@ -535,9 +628,9 @@ void BuildControls(HWND h, const Settings& s) {
     // 如果只寫進 ini、下次啟動才生效，使用者會以為沒切成功。
     // 標籤給 76px：越南文「Ngôn ngữ」是當中最長的（約 60px），原本的 60px
     // 剛好貼齊下拉選單，看起來像被切掉。下拉選單的右緣維持不變。
-    P(0, L"STATIC", i18n::T(L"介面語言"), SS_LEFT, 0, 244, 76, 18, 0);
+    P(0, L"STATIC", i18n::T(L"介面語言"), SS_LEFT, 0, langY, 76, 18, 0);
     HWND lb = P(0, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 80,
-                240, 198, 280, IDC_LANG);
+                langY - 2, 198, 280, IDC_LANG);
     for (int i = 0; i < i18n::LanguageCount(); ++i) {
         SendMessageW(lb, CB_ADDSTRING, 0, (LPARAM)i18n::Languages()[i].name);
     }
@@ -648,12 +741,16 @@ void BuildControls(HWND h, const Settings& s) {
     // ---- 共用按鈕 ----
     // 放在分頁外面：三頁共用同一組確定／取消，切頁時按鈕不會跳位置。
     g_curPage = -1;
-    Child(h, L"BUTTON", i18n::T(L"確定"), BS_DEFPUSHBUTTON, 288, kTabY + kTabH + 12, 84,
+    Child(h, L"BUTTON", i18n::T(L"確定"), BS_DEFPUSHBUTTON, 288, kTabY + tabH + 12, 84,
           28, IDOK);
-    Child(h, L"BUTTON", i18n::T(L"取消"), BS_PUSHBUTTON, 380, kTabY + kTabH + 12, 84, 28,
+    Child(h, L"BUTTON", i18n::T(L"取消"), BS_PUSHBUTTON, 380, kTabY + tabH + 12, 84, 28,
           IDCANCEL);
 
     ShowPage(h, 0);
+
+    // 版面建完才知道實際需要多高（見 noteH）。視窗在 WM_CREATE 期間建立，
+    // 這裡改大小是安全的；換語言時重建也會再跑一次，所以會跟著縮回來。
+    FitDialog(h, tabH);
 }
 
 // 切換分頁：只做 Show / Hide，不重建控制項（見 DlgState::page 的說明）。
@@ -1131,6 +1228,12 @@ void Settings::Load() {
     // ini 裡的 model_dir 也不再讀 —— 舊 ini 留著那一行無害，只是被忽略。
     ocrWarned = GetPrivateProfileIntW(L"ocr", L"warned", 0, ini.c_str()) != 0;
 
+    // 開機自動啟動：**不從 ini 讀**，直接問註冊表（見 settings.h 的說明）。
+    // 只有「這台機器上的狀態」才算數 —— 複製一份 ini 到別的電腦不該讓勾選框
+    // 說謊。Blocked（被 Windows 設定停用）也算未啟用：勾著卻不啟動是最糟的
+    // 顯示方式。
+    autoStart = autostart::Query() == autostart::State::Enabled;
+
     // 手改壞的值不要讓它一路傳到編碼器（quality=0 會被 MFT 當成「未設定」，
     // 反而回退預設值 —— 見 HANDOFF 的坑）。
     if (codec < 0 || codec > 3) codec = 0;
@@ -1227,6 +1330,10 @@ void Settings::Save() const {
                                ini.c_str());
     WritePrivateProfileStringW(L"ui", L"lang", lang.empty() ? nullptr : lang.c_str(),
                                ini.c_str());
+
+    // 開機自動啟動**不寫 ini**：真實狀態在註冊表，寫一份只會製造第二個真相
+    // （使用者從工作管理員停用之後，ini 還說 1）。ini 只記「問過了」那個記號，
+    // 而且是由 autostart 模組自己寫 —— 這裡不碰。
 
     if (hasBarPos) {
         wchar_t pos[64];
@@ -1412,13 +1519,12 @@ bool ShowSettingsDialog(HWND owner, Settings* s, bool* wantPrtsc) {
     g_dlg = &st;
 
     const DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE;
-    // 客戶區大小：分頁籤 12,12 起、452×320，按鈕在 y=344 高 28（→372），
-    // 下緣留 12。改成三分頁之後高度從 720 掉到 384 —— 這是分頁唯一的實際好處：
-    // 使用者不必再把視窗拖高才看得到下面的欄位。
+    // 客戶區大小：分頁籤 12,12 起、452×400，按鈕在 y=424 高 28（→452），
+    // 下緣留 12。
     //
-    // 高度 384 不是隨手寫的：kTabH 改大／改小都要一起改這裡，不然按鈕會被
+    // 高度 464 不是隨手寫的：kTabH 改大／改小都要一起改這裡，不然按鈕會被
     // 視窗下緣切掉（不會有任何錯誤訊息，只會看到半顆按鈕）。
-    RECT rc{0, 0, 476, 384};
+    RECT rc{0, 0, 476, 464};
     AdjustWindowRectEx(&rc, style, FALSE, WS_EX_CONTROLPARENT);
     const int w = rc.right - rc.left;
     const int h = rc.bottom - rc.top;

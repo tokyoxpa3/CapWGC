@@ -25,6 +25,7 @@
 // ============================================================================
 
 #include "controlbar.h"
+#include "autostart.h"
 #include "i18n.h"
 #include "ocr.h"
 #include "overlay.h"
@@ -1308,6 +1309,29 @@ void OpenSettings(App& a) {
                          failed.c_str()),
                     NIIF_WARNING);
     }
+
+    // 開機自動啟動：使用者勾選 / 取消勾選才動註冊表。
+    //
+    // 落實的邏輯在 autostart::Apply —— 副作用只留那一個入口。這段原本是自己
+    // 寫 if/else 直接呼叫 Enable/Disable，結果 `--settings` 那條 QA 路徑
+    // （不經過這裡）完全測不到它。抽出去之後兩條路徑共用同一份實作。
+    //
+    // 失敗要明確講：寫不進去（群組原則／安全軟體）時，勾選框下次打開會變回
+    // 未勾選，看起來就像「這個設定沒有用」。所以這裡不只寫 log，也發提示，
+    // 並把記憶體裡的意圖退回真實狀態。
+    const bool wasAuto = app::autostart::IsEnabled();
+    if (next.autoStart != wasAuto) {
+        if (!app::autostart::Apply(next.autoStart)) {
+            next.autoStart = false;
+            TrayBalloon(a, app::i18n::T(L"開機自動啟動沒有設定成功"),
+                        app::i18n::T(L"無法寫入登錄檔（可能被群組原則或安全軟體封鎖）。"
+                                     L"其他設定已儲存。"),
+                        NIIF_WARNING);
+        }
+    }
+    // 就算沒改也要更新這個欄位：它反映的是註冊表，不是 ini。
+    next.autoStart = app::autostart::IsEnabled();
+
     a.settings = next;
     a.settings.Save();
     TrayUpdate(a, a.mode == Mode::Recording);
@@ -1947,7 +1971,19 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
                                          GetModuleHandleW(nullptr), nullptr);
         // 跟托盤那條路一樣把結果存回去 —— 存檔這一步（尤其是 [hotkeys] 的
         // 字串往返）如果不在 QA 路徑上跑一次，坏了也不會有人知道。
-        if (app::ShowSettingsDialog(fakeOwner, &st)) st.Save();
+        //
+        // **開機自動啟動也要一起落實**，而且要用和 OpenSettings 同一個入口
+        // （autostart::Apply）。這裡曾經漏掉，症狀是：手動按托盤「設定」正常，
+        // 但自動化測試勾了再按確定，註冊表完全不動 —— 看起來像功能壞了，其實
+        // 是這條路徑根本沒接上副作用。QA 入口和正式入口走同一份實作，才不會
+        // 出現「測試綠燈、使用者踩雷」。
+        if (app::ShowSettingsDialog(fakeOwner, &st)) {
+            if (st.autoStart != app::autostart::IsEnabled()) {
+                app::autostart::Apply(st.autoStart);
+            }
+            st.autoStart = app::autostart::IsEnabled();
+            st.Save();
+        }
         if (fakeOwner) DestroyWindow(fakeOwner);
         if (SUCCEEDED(mf)) MFShutdown();
         CoUninitialize();
@@ -2158,6 +2194,15 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
     // 的 PrtScn，接管成功之後才補上第二輪註冊。
     ReconcilePrtScn(app);
     AutoEngagePrtScn(app);
+    // 開機自動啟動（預設開啟）。這一步會寫註冊表，所以放在托盤與熱鍵之後：
+    // 就算它失敗（群組原則），程式本身也要先能用。失敗只記 log —— 那是預設
+    // 行為而不是使用者按了什麼，登入時彈一則看不懂的警告只會讓人以為壞了；
+    // 狀態在設定視窗裡看得到。
+    app::autostart::EnsureDefaultOn();
+    app.settings.autoStart =
+        app::autostart::Query() == app::autostart::State::Enabled;
+    Log("autostart: state=%d enabled=%d", (int)app::autostart::Query(),
+        app.settings.autoStart ? 1 : 0);
     const std::wstring badHotkey = RegisterAll(app.msgwnd, app.settings.hotkeys);
     SetTimer(app.msgwnd, TIMER_TICK, 250, nullptr);
 
