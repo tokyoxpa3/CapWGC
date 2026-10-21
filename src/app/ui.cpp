@@ -882,9 +882,28 @@ void Toolbar::Paint() {
 
         if (fmt_) {
             const float tx = (float)(r.left + padX + icon + gapIT);
-            D2D1_RECT_F tr = D2D1::RectF(tx, (float)r.top, (float)r.right - 2.0f, (float)r.bottom);
-            rt_->DrawText(label, (UINT32)wcslen(label), fmt_, tr, brush,
-                          D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            const float tw = (float)r.right - 2.0f - tx;
+            const float th = (float)(r.bottom - r.top);
+            if (tw > 0.0f) {
+                // **不要用 DrawText**：ID2D1RenderTarget::DrawText 沒有「垂直對齊」
+                // 這個參數，它走的是 IDWriteTextFormat 的預設段落對齊
+                // （DWRITE_PARAGRAPH_ALIGNMENT_NEAR = 靠上）。於是圖示在分段
+                // 中央、文字卻貼在分段頂端，看起來像「字被往上推了一格」——
+                // 而且只有實際看畫面才會發現，因為兩者的水平位置是對的。
+                //
+                // 改用 TextLayout 才能設段落對齊：置中之後文字與圖示同一個
+                // 中心線（cy），也順便讓 13pt 與圖示 18dip 的視覺重量對齊。
+                IDWriteTextLayout* lay = nullptr;
+                if (SUCCEEDED(g_dw->CreateTextLayout(label, (UINT32)wcslen(label), fmt_,
+                                                     tw, th, &lay)) &&
+                    lay) {
+                    lay->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+                    lay->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                    rt_->DrawTextLayout(D2D1::Point2F(tx, (float)r.top), lay, brush,
+                                        D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                    lay->Release();
+                }
+            }
         }
     };
     drawSeg(Action::Snip, app::i18n::T(L"截圖"));
