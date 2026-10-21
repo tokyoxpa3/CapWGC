@@ -13,7 +13,7 @@ permissions:
 
 env:
   # Keep in sync with build/package.bat's default. Only used for non-tag builds.
-  DEFAULT_VERSION: 0.2.0
+  DEFAULT_VERSION: 0.3.0
 
 jobs:
   build:
@@ -141,6 +141,12 @@ jobs:
             On first run CapWGC takes over `PrtScn` from the Windows Snipping
             Tool (this is a `HKCU\Control Panel\Keyboard` setting, no admin
             needed). Turning it off in Settings restores the previous value.
+
+            It also registers itself to start at sign-in (one value under
+            `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, no admin
+            needed, current account only). Task Manager's Startup tab shows the
+            same entry and can disable it; unchecking it in Settings removes the
+            value instead of leaving a dead one behind.
 
             Deleting `models\` only disables OCR; recording and screenshots
             keep working.

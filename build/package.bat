@@ -10,13 +10,13 @@ rem   package.bat           -> dist\CapWGC-<ver>\ + dist\CapWGC-<ver>.zip
 rem   package.bat 0.1.0     -> same, with an explicit version
 rem
 rem The version is an argument because CI derives it from the git tag; a
-rem hardcoded number there would ship v0.2.0 tagged releases as "0.1.0".
+rem hardcoded number there would ship v0.3.0 tagged releases as "0.1.0".
 rem ===========================================================================
 setlocal enabledelayedexpansion
 
 set "ROOT=%~dp0.."
 set "VER=%~1"
-if "%VER%"=="" set "VER=0.2.0"
+if "%VER%"=="" set "VER=0.3.0"
 set "NAME=CapWGC-%VER%"
 set "DIST=%ROOT%\dist"
 set "STAGE=%DIST%\%NAME%"
