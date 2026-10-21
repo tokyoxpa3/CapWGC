@@ -5,9 +5,57 @@
 A lightweight Windows screen recorder and screenshot tool built on Windows.Graphics.Capture,
 Media Foundation and a hand-written MP4 muxer. No FFmpeg, no installer, no runtime dependencies.
 
-> **Status:** 0.2.0 — recording, audio, GUI, screenshot, OCR and 17 interface languages
-> all work end to end. The GUI is intentionally minimal: tray + hotkeys + region picker.
-> No timeline, no editor.
+![Picking a capture source](screenshots/picker.png)
+
+> **Status:** 0.3.0 — recording, audio, GUI, screenshot, OCR, start-at-sign-in and
+> 17 interface languages all work end to end. The GUI is intentionally minimal:
+> tray + hotkeys + region picker. No timeline, no editor.
+
+## Highlights
+
+- **A 1 MB exe, nothing to install.** Static CRT, no VC++ redistributable, no
+  FFmpeg, no Python. Unzip and run; deleting the folder uninstalls it.
+- **Capture that survives real use.** Windows.Graphics.Capture keeps working when
+  a window is resized, moved between monitors, or the resolution changes — no
+  borderless-window hacks, no black frames.
+- **Hardware encoding, picked for you.** H.264 / HEVC / AV1 through Media
+  Foundation MFTs, chosen at startup from what the GPU actually exposes.
+- **Audio stays in sync.** The MP4 writer emits `edts/elst` and `tfdt`, so a
+  loopback capture that starts a few hundred milliseconds late is compensated
+  instead of drifting for the rest of the file.
+- **Screenshot → text in one key.** `PrtScn` takes over from the Windows Snipping
+  Tool, the snip goes to file + clipboard, and OCR (PP-OCR via ONNX Runtime, in
+  process) puts the recognised text straight on the clipboard.
+- **Tray-first.** No main window, no dock icon, two hotkeys out of the box, all
+  of them rebindable; the floating bar is the only thing on screen while recording.
+- **17 languages, switched live.** The settings window rebuilds itself the moment
+  you pick a language — no restart, no half-translated screen.
+- **Honest defaults.** Start at sign-in is on by default and shows up in Task
+  Manager's Startup tab like any other entry; `HKCU` only, no admin rights, and
+  unchecking it removes the value instead of leaving a dead one behind.
+
+## Screenshots
+
+The picker at the top is the main window — a tray app's "main window" is the thing
+you see when you click the tray icon. The other three surfaces:
+
+**Settings** — three tabs. The start-at-sign-in switch says what it writes, to
+which account, and whether it needs admin rights, because a default that touches
+the registry should not be a surprise.
+
+![Settings](screenshots/settings.png)
+
+**Screenshot / OCR** — one overlay, two verbs: snip, or snip and recognise. The
+toolbar follows the selection, so the two actions are always where you are looking.
+
+![Snip toolbar](screenshots/snip-toolbar.png)
+
+**Recording bar** — stop and mute, nothing else. It is excluded from the capture,
+so it never appears in the file.
+
+![Floating bar](screenshots/control-bar.png)
+
+These are real screenshots of `out\CapWGC.exe`, not mockups.
 
 ## Why another recorder
 
@@ -34,6 +82,7 @@ The goal is Captura's feature set with LICEcap's startup cost and OBS's encoding
 | OCR | in-process ONNX Runtime (PP-OCRv6), text straight to the clipboard |
 | Window picker | thumbnail wall, live-refreshing, filters out cloaked windows |
 | Print Screen takeover | `PrtScn` replaces the Windows Snipping Tool shortcut (on by default) |
+| Start at sign-in | `HKCU\...\Run`, on by default, mirrors the Task Manager Startup switch |
 | Settings | three tabs (general / OCR / hotkeys), all hotkeys rebindable and persisted |
 | Languages | 17, picked in Settings → General; the switch is immediate, no restart |
 | Output | MP4 (fMP4), VFR |
@@ -58,6 +107,15 @@ Snipping Tool" (`HKCU\Control Panel\Keyboard\PrintScreenKeyForSnippingEnabled`),
 because Windows swallows the key before `RegisterHotKey` ever sees it. This is on
 by default; unchecking it in Settings → OCR restores the Windows behaviour and
 falls back to `Ctrl+Alt+X`. `Win+Shift+S` is unaffected either way.
+
+Start at sign-in is also on by default, and it is the same kind of promise: it
+writes exactly one value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`,
+so it covers the current account only and needs no administrator rights.
+Unchecking it deletes the value and the `StartupApproved` marker, which is why
+Task Manager's Startup tab and the settings checkbox always agree — the checkbox
+reads the registry, not a second copy in the ini. If the write is blocked (group
+policy, security software), the box reverts and a tray balloon says so, rather
+than leaving a tick that does nothing.
 
 Settings and logs live in `%LOCALAPPDATA%\CapWGC\`.
 
@@ -125,7 +183,7 @@ lines and are driven by the Python scripts used during development (not part of 
 ### Package
 
 ```bat
-build\package.bat 0.2.0    :: dist\CapWGC-0.2.0.zip
+build\package.bat 0.3.0    :: dist\CapWGC-0.3.0.zip
 ```
 
 The zip is the whole product: `CapWGC.exe`, `onnxruntime.dll`, `models\`, `locale\`.
@@ -166,6 +224,7 @@ src/probe/   one-behaviour test harnesses
 locale/      one JSON per interface language, keyed by the source string
 build/       build.bat, package.bat, prepare-models.bat, app.rc, app.ico, app_rec.ico
 models/      OCR dictionary (weights are downloaded, not committed)
+screenshots/ the screenshots used above, captured from the real exe
 ```
 
 ## License
@@ -183,7 +242,11 @@ CapWGC 是一個 Windows 錄屏與截圖工具：WGC 抓畫面、Media Foundatio
 - 系統聲 + 麥克風（GUI 混成一軌，CLI 分軌方便量測）
 - 截圖與 OCR（行程內 ONNX，不經 Python，不用裝任何東西）
 - 托盤常駐、熱鍵可自訂、無主視窗
+- 開機時自動啟動（只寫 HKCU，預設開啟，工作管理員的「啟動」頁看得到也停得掉）
 - 介面 17 種語言，設定視窗裡換了當場生效，不必重開
 
-建置：`build\build.bat`，產物在 `out\`；打包：`build\package.bat 0.2.0`。
+介面長相：上方 [Screenshots](#screenshots) 那四張就是實際畫面（選擇來源、設定、
+截圖工具列、錄影浮動列），不是合成圖。
+
+建置：`build\build.bat`，產物在 `out\`；打包：`build\package.bat 0.3.0`。
 介面文字在 `locale\<語言>.json`，key 就是程式裡的繁體中文原文，查不到就顯示原文。
