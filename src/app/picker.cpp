@@ -289,6 +289,11 @@ private:
     void DrawCard(HDC dc, int idx, bool selected, bool hover);
     void DrawButton(HDC dc, const RECT& r, const wchar_t* text, bool primary, bool hover);
     void DrawFooter(HDC dc);
+    // 自繪捲軸：見 Layout 的說明，不用 WS_VSCROLL。
+    void DrawScrollBar(HDC dc);
+    bool HitScrollBar(POINT pt) const;
+    int PageHeight() const;
+    void DragThumbTo(int y);
 
     // ---- 互動 ----
     void SetTab(int t);
@@ -349,6 +354,12 @@ private:
 
     int scroll_ = 0;
     int maxScroll_ = 0;
+    // 自繪捲軸的幾何（見 DrawScrollBar）。sbThumb_ 由 UpdateScroll 算，
+    // 其他兩個在 Layout 算。
+    RECT sbTrack_{}, sbThumb_{};
+    bool sbDrag_ = false;    // 正在拖拇指
+    int sbGrab_ = 0;         // 按下點落在拇指內的偏移，拖動時要保持住
+    bool sbHover_ = false;
     int cardW_ = 240, cardH_ = 175, gap_ = 16, gridTop_ = 96;
     RECT viewport_{}, tabRect_[3]{}, btnOk_{}, btnCancel_{}, btnSetup_{}, footer_{};
 
@@ -824,7 +835,7 @@ bool Picker::CreateAndShow() {
     if (y < work.top) y = work.top;
 
     hwnd_ = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, L"CapWGCPicker",
-                            i18n::T(L"CapWGC 選擇來源"), WS_POPUP | WS_VSCROLL, x, y, w, h, nullptr,
+                            i18n::T(L"CapWGC 選擇來源"), WS_POPUP, x, y, w, h, nullptr,
                             nullptr, GetModuleHandleW(nullptr), this);
     if (!hwnd_) return false;
     SetWindowLongPtrW(hwnd_, GWLP_USERDATA, (LONG_PTR)this);
@@ -903,7 +914,21 @@ void Picker::Layout() {
 
     gridTop_ = headerH + tabsH;
     footer_ = RECT{0, rc.bottom - footerH, rc.right, rc.bottom};
-    viewport_ = RECT{padX, gridTop_, rc.right - padX, footer_.top - S(8)};
+
+    // ---- 右側捲軸（自繪） ----
+    //
+    // 原本用 WS_VSCROLL 讓系統畫。在 Windows 11 上那條捲軸會變成「自動隱藏」
+    // 的覆蓋式細線：寬度只剩 8px、顏色跟隨系統淺色主題（深色視窗右邊一條白
+    // 邊），而且滑鼠要壓在那一條線正上方才抓得到 —— 實際用起來就是「看得到、
+    // 拉不動」。這裡改成自己畫：固定 10px 寬、深色配色、整條軌道都吃滑鼠
+    // （HitScrollBar 會把可點區域再放大），拖拇指、點軌道翻頁、滾輪三種都通。
+    //
+    // 軌道永遠保留，不隨「有沒有東西可捲」出現／消失：那會讓卡片在捲軸出現的
+    // 那一刻整排往左跳一格。
+    const int sbW = S(10);
+    const int sbRight = rc.right - S(10);
+    sbTrack_ = RECT{sbRight - sbW, gridTop_, sbRight, footer_.top - S(8)};
+    viewport_ = RECT{padX, gridTop_, sbTrack_.left - S(8), footer_.top - S(8)};
     gap_ = S(16);
 
     const int contentW = viewport_.right - viewport_.left;
@@ -971,20 +996,49 @@ void Picker::Layout() {
 
 void Picker::UpdateScroll() {
     if (!hwnd_) return;
-    const int viewH = std::max(1, (int)(viewport_.bottom - viewport_.top));
+    const int viewH = PageHeight();
     const int contentH = ContentHeight();
     maxScroll_ = std::max(0, contentH - viewH);
     if (scroll_ > maxScroll_) scroll_ = maxScroll_;
     if (scroll_ < 0) scroll_ = 0;
 
-    SCROLLINFO si{};
-    si.cbSize = sizeof(si);
-    si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
-    si.nMin = 0;
-    si.nMax = contentH > 0 ? contentH - 1 : 0;
-    si.nPage = (UINT)viewH;
-    si.nPos = scroll_;
-    SetScrollInfo(hwnd_, SB_VERT, &si, TRUE);
+    // 拇指幾何：長度按「可見比例」，位置按 scroll_ / maxScroll_。
+    // 最短 S(32)：清單只有十幾個項目時，按比例算出來的拇指會細到抓不住。
+    const int trackH = std::max(1, (int)(sbTrack_.bottom - sbTrack_.top));
+    sbThumb_ = sbTrack_;
+    if (maxScroll_ <= 0) {
+        sbThumb_.bottom = sbThumb_.top;   // 不需要捲 → 不畫（見 DrawScrollBar）
+        return;
+    }
+    int thumbH = (int)((long long)trackH * viewH / std::max(1, contentH));
+    thumbH = std::max(S(32), std::min(trackH, thumbH));
+    const int span = trackH - thumbH;
+    const int top = sbTrack_.top + (int)((long long)span * scroll_ / maxScroll_);
+    sbThumb_ = RECT{sbTrack_.left, top, sbTrack_.right, top + thumbH};
+}
+
+int Picker::PageHeight() const {
+    return std::max(1, (int)(viewport_.bottom - viewport_.top));
+}
+
+bool Picker::HitScrollBar(POINT pt) const {
+    if (maxScroll_ <= 0) return false;
+    // 軌道左右各放寬 S(6)：10px 的拇指在 4K / 高縮放下還是很細，
+    // 讓「往右偏一點」也抓得到，比要求使用者對準好。
+    RECT r = sbTrack_;
+    r.left -= S(6);
+    r.right += S(6);
+    return PtInRect(&r, pt) != 0;
+}
+
+void Picker::DragThumbTo(int y) {
+    const int trackH = (int)(sbTrack_.bottom - sbTrack_.top);
+    const int thumbH = (int)(sbThumb_.bottom - sbThumb_.top);
+    const int span = trackH - thumbH;
+    if (span <= 0) return;
+    int top = y - sbGrab_ - sbTrack_.top;
+    top = std::max(0, std::min(span, top));
+    ScrollBy((int)((long long)top * maxScroll_ / span) - scroll_);
 }
 
 // ============================================================================
@@ -1138,6 +1192,28 @@ void Picker::DrawGrid(HDC dc) {
     RestoreDC(dc, saved);
 }
 
+void Picker::DrawScrollBar(HDC dc) {
+    if (maxScroll_ <= 0 || !hwnd_) return;
+
+    const int rad = (int)(sbTrack_.right - sbTrack_.left);
+    HGDIOBJ oldPen = SelectObject(dc, GetStockObject(NULL_PEN));
+
+    // 軌道：用 kLine，比背景亮一階，看得出來是「可以拉的東西」但不會搶眼。
+    HGDIOBJ oldBr = SelectObject(dc, brLine_);
+    RoundRect(dc, sbTrack_.left, sbTrack_.top, sbTrack_.right, sbTrack_.bottom, rad, rad);
+
+    // 拇指：平常 kSub，滑過或拖曳中提亮。深色視窗上「亮 = 可互動」比
+    // 「暗 = 未啟用」好讀，而且和卡片的 hover 提亮規則一致。
+    const COLORREF c = (sbDrag_ || sbHover_) ? kText : kSub;
+    HBRUSH br = CreateSolidBrush(c);
+    SelectObject(dc, br);
+    RoundRect(dc, sbThumb_.left, sbThumb_.top, sbThumb_.right, sbThumb_.bottom, rad, rad);
+    DeleteObject(br);
+
+    SelectObject(dc, oldBr);
+    SelectObject(dc, oldPen);
+}
+
 void Picker::DrawButton(HDC dc, const RECT& r, const wchar_t* text, bool primary,
                         bool hover) {
     HBRUSH fill = primary ? (hover ? brAccentHi_ : brAccent_) : (hover ? brCardHi_ : brCard_);
@@ -1224,6 +1300,7 @@ void Picker::Paint() {
 
     DrawTabs(mem);
     DrawGrid(mem);
+    DrawScrollBar(mem);
     DrawFooter(mem);
 
     BitBlt(dc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
@@ -1435,18 +1512,28 @@ LRESULT Picker::Handle(HWND h, UINT m, WPARAM w, LPARAM l) {
             TrackMouseEvent(&tme);
             tracking_ = true;
         }
-        const int hc = HitCard(p);
-        const int ht = HitTab(p);
-        const int hb = HitButton(p);
-        if (hc != hover_ || ht != hoverTab_ || hb != hoverBtn_) {
+        // 拖拇指：先吃掉，不要讓下面的 hover / 游標邏輯把拖曳打斷。
+        // SetCapture 之後就算游標跑到軌道外也還收得到這裡的座標，
+        // 所以往上／往下拖出視窗邊界不會「卡住」。
+        if (sbDrag_) {
+            DragThumbTo(p.y);
+            return 0;
+        }
+        const bool sbHover = HitScrollBar(p);
+        const int hc = sbHover ? -1 : HitCard(p);
+        const int ht = sbHover ? -1 : HitTab(p);
+        const int hb = sbHover ? 0 : HitButton(p);
+        if (hc != hover_ || ht != hoverTab_ || hb != hoverBtn_ || sbHover != sbHover_) {
             hover_ = hc;
             hoverTab_ = ht;
             hoverBtn_ = hb;
+            sbHover_ = sbHover;
             InvalidateRect(h, nullptr, FALSE);
         }
         const bool clickable = (hc >= 0) || (ht >= 0) || (hb != 0);
         // IDC_HAND / IDC_ARROW 是 MAKEINTRESOURCE 的 LPSTR，要轉成 W 版才過得了
         // LoadCursorW 的 LPCWSTR（直接寫 (LPCWSTR)IDC_HAND 就是這個原因）。
+        // 捲軸用箭頭，不用手型：Windows 的捲軸本來就不是手型。
         SetCursor(LoadCursorW(nullptr, (LPCWSTR)(clickable ? IDC_HAND : IDC_ARROW)));
         return 0;
     }
@@ -1455,11 +1542,24 @@ LRESULT Picker::Handle(HWND h, UINT m, WPARAM w, LPARAM l) {
         tracking_ = false;
         hover_ = hoverTab_ = -1;
         hoverBtn_ = 0;
+        sbHover_ = false;
         InvalidateRect(h, nullptr, FALSE);
         return 0;
 
     case WM_LBUTTONDOWN: {
         const POINT p{GET_X_LPARAM(l), GET_Y_LPARAM(l)};
+        // 捲軸先判：軌道的可點區域有放大（HitScrollBar），不能讓底下的卡片搶走。
+        if (HitScrollBar(p)) {
+            if (PtInRect(&sbThumb_, p)) {
+                sbDrag_ = true;
+                sbGrab_ = p.y - sbThumb_.top;
+                SetCapture(h);
+            } else {
+                // 點軌道 = 翻一頁，方向看點在拇指上方還是下方（和系統捲軸一致）。
+                ScrollBy(p.y < sbThumb_.top ? -PageHeight() : PageHeight());
+            }
+            return 0;
+        }
         const int hb = HitButton(p);
         if (hb == 1) { Confirm(); return 0; }
         if (hb == 2) { Cancel(); return 0; }
@@ -1484,30 +1584,24 @@ LRESULT Picker::Handle(HWND h, UINT m, WPARAM w, LPARAM l) {
         return 0;
     }
 
+    case WM_LBUTTONUP:
+        if (sbDrag_) {
+            sbDrag_ = false;
+            ReleaseCapture();
+            InvalidateRect(h, nullptr, FALSE);
+        }
+        return 0;
+
+    case WM_CAPTURECHANGED:
+        // 拖到一半被別人搶走（Alt+Tab、系統對話框）：不要留著 sbDrag_=true，
+        // 否則回來之後滑鼠一動就繼續捲，看起來像「視窗自己在跳」。
+        sbDrag_ = false;
+        InvalidateRect(h, nullptr, FALSE);
+        return 0;
+
     case WM_MOUSEWHEEL: {
         const int delta = GET_WHEEL_DELTA_WPARAM(w);
         ScrollBy(-(delta / WHEEL_DELTA) * S(120));
-        return 0;
-    }
-
-    case WM_VSCROLL: {
-        SCROLLINFO si{};
-        si.cbSize = sizeof(si);
-        si.fMask = SIF_ALL;
-        GetScrollInfo(h, SB_VERT, &si);
-        int pos = si.nPos;
-        switch (LOWORD(w)) {
-        case SB_LINEUP: pos -= S(60); break;
-        case SB_LINEDOWN: pos += S(60); break;
-        case SB_PAGEUP: pos -= (int)si.nPage; break;
-        case SB_PAGEDOWN: pos += (int)si.nPage; break;
-        case SB_THUMBTRACK:
-        case SB_THUMBPOSITION: pos = si.nTrackPos; break;
-        case SB_TOP: pos = 0; break;
-        case SB_BOTTOM: pos = maxScroll_; break;
-        default: return 0;
-        }
-        ScrollBy(pos - scroll_);
         return 0;
     }
 
